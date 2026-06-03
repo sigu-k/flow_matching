@@ -60,6 +60,18 @@ def get_args_parser():
         help="Use skewed timestep sampling proposed in the EDM paper: https://arxiv.org/abs/2206.00364.",
     )
     parser.add_argument(
+        "--timestep_dist",
+        default="uniform",
+        choices=["uniform", "center", "both", "data", "noise"],
+        help="Density rho(t)=1+shape(t) used to sample training timesteps.",
+    )
+    parser.add_argument(
+        "--sampling_dist",
+        default="uniform",
+        choices=["uniform", "center", "both", "data", "noise"],
+        help="Density rho(t)=1+shape(t) used to place inference ODE steps.",
+    )
+    parser.add_argument(
         "--edm_schedule",
         action="store_true",
         help="Use the alternative time discretization during sampling proposed in the EDM paper: https://arxiv.org/abs/2206.00364.",

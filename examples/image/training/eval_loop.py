@@ -26,6 +26,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from torchvision.utils import save_image
 from training import distributed_mode
 from training.edm_time_discretization import get_time_discretization
+from training.timestep_density import sampling_timesteps
 from training.train_loop import MASK_TOKEN
 
 logger = logging.getLogger(__name__)
@@ -150,8 +151,20 @@ def eval_model(
 
                 if args.edm_schedule:
                     time_grid = get_time_discretization(nfes=ode_opts["nfe"])
-                else:
+                elif args.sampling_dist == "uniform" and "nfe" not in ode_opts:
+                    # Backward-compatible default: integrate over [0, 1] and let
+                    # the solver discretize uniformly using step_size.
                     time_grid = torch.tensor([0.0, 1.0], device=device)
+                else:
+                    assert "nfe" in ode_opts, (
+                        "Density-based step placement needs the step count; "
+                        "pass it via --ode_options '{\"nfe\": N}'."
+                    )
+                    time_grid = sampling_timesteps(
+                        num_steps=ode_opts["nfe"],
+                        dist=args.sampling_dist,
+                        device=device,
+                    )
 
                 synthetic_samples = solver.sample(
                     time_grid=time_grid,

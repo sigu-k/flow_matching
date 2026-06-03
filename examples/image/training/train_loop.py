@@ -16,6 +16,7 @@ from models.ema import EMA
 from torch.nn.parallel import DistributedDataParallel
 from torchmetrics.aggregation import MeanMetric
 from training.grad_scaler import NativeScalerWithGradNormCount
+from training.timestep_density import sample_timesteps
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,9 @@ def train_one_epoch(
 
         if args.discrete_flow_matching:
             samples = (samples * 255.0).to(torch.long)
-            t = torch.torch.rand(samples.shape[0]).to(device)
+            t = sample_timesteps(
+                samples.shape[0], dist=args.timestep_dist, device=device
+            )
 
             # sample probability path
             x_0 = (
@@ -89,10 +92,9 @@ def train_one_epoch(
             # Scaling to [-1, 1] from [0, 1]
             samples = samples * 2.0 - 1.0
             noise = torch.randn_like(samples).to(device)
-            if args.skewed_timesteps:
-                t = skewed_timestep_sample(samples.shape[0], device=device)
-            else:
-                t = torch.torch.rand(samples.shape[0]).to(device)
+            t = sample_timesteps(
+                samples.shape[0], dist=args.timestep_dist, device=device
+            )
             path_sample = path.sample(t=t, x_0=noise, x_1=samples)
             x_t = path_sample.x_t
             u_t = path_sample.dx_t
