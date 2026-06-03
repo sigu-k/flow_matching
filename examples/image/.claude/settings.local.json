@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/jovyan/work/srv21/flow_matching/**)",
+      "Bash(find . -iname \"*handoff*\")",
+      "Bash(python verify_density_algo.py)",
+      "Bash(python *)",
+      "Bash(conda env *)",
+      "Bash(conda run *)",
+      "Bash(pip show *)",
+      "Bash(pip install *)",
+      "Bash(PYTHONPATH=/home/jovyan/work/srv21/flow_matching timeout 600 python train.py --dataset=cifar10 --batch_size=64 --class_drop_prob=1.0 --cfg_scale=0.0 --timestep_dist=center --test_run)",
+      "Bash(PYTHONPATH=/home/jovyan/work/srv21/flow_matching timeout 600 python train.py --dataset=cifar10 --batch_size=64 --class_drop_prob=1.0 --cfg_scale=0.0 --timestep_dist=noise --sampling_dist=both --ode_method=heun2 --ode_options='{\"nfe\":50}' --test_run)"
+    ]
+  }
+}

@@ -1,0 +1,41 @@
+===== Training uniform from scratch =====
+Traceback (most recent call last):
+  File "/home/jovyan/work/srv21/flow_matching/examples/image/train.py", line 21, in <module>
+    from train_arg_parser import get_args_parser
+  File "/home/jovyan/work/srv21/flow_matching/examples/image/train_arg_parser.py", line 11, in <module>
+    from torchdiffeq._impl.odeint import SOLVERS
+ModuleNotFoundError: No module named 'torchdiffeq'
+===== Done uniform =====
+===== Training center from scratch =====
+Traceback (most recent call last):
+  File "/home/jovyan/work/srv21/flow_matching/examples/image/train.py", line 21, in <module>
+    from train_arg_parser import get_args_parser
+  File "/home/jovyan/work/srv21/flow_matching/examples/image/train_arg_parser.py", line 11, in <module>
+    from torchdiffeq._impl.odeint import SOLVERS
+ModuleNotFoundError: No module named 'torchdiffeq'
+===== Done center =====
+===== Training both from scratch =====
+Traceback (most recent call last):
+  File "/home/jovyan/work/srv21/flow_matching/examples/image/train.py", line 21, in <module>
+    from train_arg_parser import get_args_parser
+  File "/home/jovyan/work/srv21/flow_matching/examples/image/train_arg_parser.py", line 11, in <module>
+    from torchdiffeq._impl.odeint import SOLVERS
+ModuleNotFoundError: No module named 'torchdiffeq'
+===== Done both =====
+===== Training data from scratch =====
+Traceback (most recent call last):
+  File "/home/jovyan/work/srv21/flow_matching/examples/image/train.py", line 21, in <module>
+    from train_arg_parser import get_args_parser
+  File "/home/jovyan/work/srv21/flow_matching/examples/image/train_arg_parser.py", line 11, in <module>
+    from torchdiffeq._impl.odeint import SOLVERS
+ModuleNotFoundError: No module named 'torchdiffeq'
+===== Done data =====
+===== Training noise from scratch =====
+Traceback (most recent call last):
+  File "/home/jovyan/work/srv21/flow_matching/examples/image/train.py", line 21, in <module>
+    from train_arg_parser import get_args_parser
+  File "/home/jovyan/work/srv21/flow_matching/examples/image/train_arg_parser.py", line 11, in <module>
+    from torchdiffeq._impl.odeint import SOLVERS
+ModuleNotFoundError: No module named 'torchdiffeq'
+===== Done noise =====
+All training done!
