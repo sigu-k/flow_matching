@@ -1,0 +1,76 @@
+# Phase 0: CIFAR-10 Flow Matching – Uniform Timestep Sampling
+# Hyperparameter reference for train_phase0_uniform.py
+# (The script reads these as hard-coded constants; this file is documentation.)
+
+run:
+  max_epochs: 300
+  eval_every: 20        # FID evaluation every N epochs
+  seed: 42
+  device: "cuda"
+
+model:
+  architecture: "cifar10"      # uses MODEL_CONFIGS["cifar10"] from model_configs.py
+  model_channels: 128
+  channel_mult: [2, 2, 2]
+  num_res_blocks: 4
+  attention_resolutions: [2]
+  num_heads: 1
+  dropout: 0.3
+  use_scale_shift_norm: true
+  total_params_M: 111.4        # approximate
+
+ema:
+  decay: 0.99995
+  # Effective decay uses min(decay, (1+n)/(10+n)) warmup at early steps.
+
+optimizer:
+  type: AdamW
+  lr: 1.0e-4
+  betas: [0.9, 0.95]
+
+lr_schedule:
+  type: linear_warmup_then_constant
+  warmup_steps: 10000
+  peak_lr: 1.0e-4
+
+data:
+  dataset: cifar10
+  image_size: 32
+  channels: 3
+  conditioning: unconditional     # class_drop_prob = 1.0
+  augmentation: random_horizontal_flip
+  batch_size: 64
+  precision: fp32
+
+timestep_sampling:
+  distribution: uniform           # t ~ Uniform(0, 1)
+
+flow_matching:
+  path: CondOTProbPath            # straight-line: x_t=(1-t)*noise+t*data
+  target: velocity                # v_t = data - noise
+  loss: MSE
+
+evaluation:
+  fid_samples: 50000
+  fid_nfe: 50                     # Euler steps (time_grid has 51 points)
+  fid_batch_size: 250
+  fid_seed: 0
+  ode_method: euler
+  weights: [ema, raw]
+
+checkpointing:
+  dir: "~/work/srv11/checkpoints/phase0"
+  latest_every_epoch: true
+  periodic_every_epochs: 20       # same as eval_every
+  keep_recent_n: 3
+  long_term_snapshots: [100, 200, 300]
+
+wandb:
+  project: "phase0-uniform-saturation"
+  log_train_loss_every_steps: 100
+  log_fid_every_epochs: 20
+
+expected_runtime:
+  training_300ep: "~10h on A100 40GB"
+  fid_per_eval: "~7 min"
+  total_with_15_evals: "~12h"
