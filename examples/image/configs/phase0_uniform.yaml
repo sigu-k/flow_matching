@@ -57,6 +57,13 @@ evaluation:
   fid_seed: 0
   ode_method: euler
   weights: [ema, raw]
+  # Training is pure fp32. Inference uses AMP (fp16 UNet kernels, fp32 Euler
+  # integration) to match existing eval_loop.py behaviour and meet runtime budget.
+  # FID values are NOT directly comparable to pure fp32 inference; difference is
+  # typically < 0.5 FID. All 15 evaluation points use the same setting, so
+  # epoch-to-epoch trends and saturation detection are unaffected.
+  inference_precision: amp_fp16
+  training_precision: fp32
 
 checkpointing:
   dir: "~/work/srv11/checkpoints/phase0"
