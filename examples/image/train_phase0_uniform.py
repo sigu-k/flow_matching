@@ -53,8 +53,9 @@ FID_NFE = 50            # Euler steps (time_grid has NFE+1 points)
 FID_BATCH = 250
 FID_SEED = 0
 
-KEEP_RECENT_N = 3       # how many recent periodic checkpoints to keep
-KEEP_EPOCHS = {100, 200, 300}  # long-term snapshots never pruned
+KEEP_RECENT_N = 999     # effectively keep all periodic checkpoints
+KEEP_EPOCHS = {20, 40, 60, 80, 100, 120, 140, 160, 180, 200,
+               220, 240, 260, 280, 300}  # all 15 eval points kept forever
 
 
 # ---------------------------------------------------------------------------
