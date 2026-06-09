@@ -3,9 +3,12 @@
 #
 # This source code is licensed under the CC-by-NC license found in the
 # LICENSE file in the root directory of this source tree.
+import datetime
 import gc
+import json
 import logging
 import os
+import time
 from argparse import Namespace
 from pathlib import Path
 from typing import Iterable
@@ -235,3 +238,127 @@ def eval_model(
             break
 
     return {"fid": float(fid_metric.compute().detach().cpu())}
+
+
+class _GeneratedDataset(torch.utils.data.Dataset):
+    """Wraps a uint8 CHW tensor for torch-fidelity consumption."""
+
+    def __init__(self, images: torch.Tensor):
+        self.images = images  # (N, C, H, W) uint8
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        return self.images[idx]
+
+
+def run_fid_sweep(
+    model: torch.nn.Module,
+    device: torch.device,
+    args: Namespace,
+) -> dict:
+    """Standalone generation + FID for the 5x5 sweep.
+
+    Generates args.fid_samples images with Euler ODE (NFE=args.nfe),
+    step placements from args.sampling_dist, then computes FID against
+    CIFAR-10 train using torch-fidelity. Saves fid.json and prints
+    'FID: <value>'. Skips silently if fid.json already exists.
+
+    train_dist is read from args.timestep_dist (= the checkpoint's
+    training distribution, passed via --timestep_dist at invocation).
+    """
+    import torch_fidelity
+
+    fid_path = Path(args.output_dir) / "fid.json"
+    if fid_path.exists():
+        with open(fid_path) as f:
+            result = json.load(f)
+        print(f"FID: {result['fid']}  (loaded from existing {fid_path})")
+        return result
+
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    torch.manual_seed(args.seed)
+
+    cfg_scaled_model = CFGScaledModel(model=model)
+    cfg_scaled_model.train(False)
+    solver = ODESolver(velocity_model=cfg_scaled_model)
+
+    time_grid = sampling_timesteps(
+        num_steps=args.nfe,
+        dist=args.sampling_dist,
+        device=device,
+    )
+
+    all_images: list[torch.Tensor] = []
+    num_generated = 0
+    batch_size = args.batch_size
+
+    # CIFAR-10 images are 3×32×32
+    img_channels, img_size = 3, 32
+
+    t0 = time.time()
+    while num_generated < args.fid_samples:
+        current_batch = min(batch_size, args.fid_samples - num_generated)
+        x_0 = torch.randn(
+            current_batch, img_channels, img_size, img_size,
+            dtype=torch.float32, device=device,
+        )
+        # Unconditional CIFAR-10 (num_classes=None); labels are ignored by the
+        # model but CFGScaledModel.forward() still requires the argument.
+        labels = torch.zeros(current_batch, dtype=torch.long, device=device)
+
+        cfg_scaled_model.reset_nfe_counter()
+        synthetic = solver.sample(
+            time_grid=time_grid,
+            x_init=x_0,
+            method="euler",
+            return_intermediates=False,
+            step_size=None,
+            label=labels,
+            cfg_scale=args.cfg_scale,
+        )
+
+        # [-1, 1] → [0, 255] uint8
+        synthetic = torch.clamp(synthetic * 0.5 + 0.5, 0.0, 1.0)
+        synthetic = (synthetic * 255).to(torch.uint8).cpu()
+        all_images.append(synthetic)
+        num_generated += current_batch
+        logger.info(
+            f"Generated {num_generated}/{args.fid_samples} "
+            f"(NFE per batch: {cfg_scaled_model.get_nfe()})"
+        )
+
+    elapsed = time.time() - t0
+    all_images_tensor = torch.cat(all_images, dim=0)[: args.fid_samples]
+
+    logger.info("Computing FID with torch-fidelity …")
+    metrics = torch_fidelity.calculate_metrics(
+        input1="cifar10-train",
+        input2=_GeneratedDataset(all_images_tensor),
+        fid=True,
+        datasets_root=args.data_path,
+        cuda=str(device).startswith("cuda"),
+        verbose=False,
+    )
+    fid_value = float(metrics["frechet_inception_distance"])
+
+    print(f"FID: {fid_value}")
+
+    result = {
+        "train_dist": args.timestep_dist,
+        "sampling_dist": args.sampling_dist,
+        "fid": fid_value,
+        "ode_method": "euler",
+        "nfe": args.nfe,
+        "fid_samples": args.fid_samples,
+        "batch_size": args.batch_size,
+        "seed": args.seed,
+        "elapsed_sec": round(elapsed, 1),
+        "timestamp": datetime.datetime.now().isoformat(),
+    }
+    with open(fid_path, "w") as f:
+        json.dump(result, f, indent=2)
+    logger.info(f"Saved {fid_path}")
+    return result

@@ -22,7 +22,7 @@ from train_arg_parser import get_args_parser
 
 from training import distributed_mode
 from training.data_transform import get_train_transform
-from training.eval_loop import eval_model
+from training.eval_loop import eval_model, run_fid_sweep
 from training.grad_scaler import NativeScalerWithGradNormCount as NativeScaler
 from training.load_and_save import load_model, save_model
 from training.train_loop import train_one_epoch
@@ -184,22 +184,29 @@ def main(args):
                     loss_scaler=loss_scaler,
                     epoch=epoch,
                 )
-            if args.distributed:
-                data_loader_train.sampler.set_epoch(0)
-            if distributed_mode.is_main_process():
-                fid_samples = args.fid_samples - (num_tasks - 1) * (
-                    args.fid_samples // num_tasks
-                )
+            if args.eval_only:
+                # Standalone sweep: use run_fid_sweep (no data_loader needed).
+                if distributed_mode.is_main_process():
+                    eval_stats = run_fid_sweep(model, device, args)
+                else:
+                    eval_stats = {}
             else:
-                fid_samples = args.fid_samples // num_tasks
-            eval_stats = eval_model(
-                model,
-                data_loader_train,
-                device,
-                epoch=epoch,
-                fid_samples=fid_samples,
-                args=args,
-            )
+                if args.distributed:
+                    data_loader_train.sampler.set_epoch(0)
+                if distributed_mode.is_main_process():
+                    fid_samples = args.fid_samples - (num_tasks - 1) * (
+                        args.fid_samples // num_tasks
+                    )
+                else:
+                    fid_samples = args.fid_samples // num_tasks
+                eval_stats = eval_model(
+                    model,
+                    data_loader_train,
+                    device,
+                    epoch=epoch,
+                    fid_samples=fid_samples,
+                    args=args,
+                )
             log_stats.update({f"eval_{k}": v for k, v in eval_stats.items()})
 
         if args.output_dir and distributed_mode.is_main_process():

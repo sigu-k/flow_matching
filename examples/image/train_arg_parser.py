@@ -144,6 +144,12 @@ def get_args_parser():
         help="Classifier-free guidance scale for generating samples.",
     )
     parser.add_argument(
+        "--nfe",
+        default=50,
+        type=int,
+        help="Number of function evaluations (ODE steps) for density-based sampling in run_fid_sweep.",
+    )
+    parser.add_argument(
         "--fid_samples",
         default=50000,
         type=int,
