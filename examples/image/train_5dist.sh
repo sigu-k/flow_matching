@@ -1,6 +1,6 @@
 #!/bin/bash
-export PYTHONPATH=/home/jovyan/work/srv21/flow_matching:$PYTHONPATH
-cd ~/work/srv21/flow_matching/examples/image
+export PYTHONPATH=/home/jovyan/work/srv11/flow_matching:$PYTHONPATH
+cd ~/work/srv11/flow_matching/examples/image
 for dist in uniform center both data noise; do
     OUT=./output_${dist}
     RESUME=""
