@@ -11,7 +11,7 @@ BASE_DIR="fid_results/nfe_${NFE}"
 
 # パッケージ再インストール(コンテナリセット対策)
 pip install torchdiffeq torchmetrics[image] torch-fidelity --break-system-packages -q
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 LOG="${BASE_DIR}/sweep.log"
 mkdir -p "${BASE_DIR}"
@@ -69,6 +69,6 @@ echo "========================================"
 FILLED=$(find "${BASE_DIR}" -name "fid.json" | wc -l)
 if [ "$FILLED" -ge 25 ]; then
     echo "Running summarize_fid.py and analyze_fid.py ..."
-    python summarize_fid.py --fid_dir "${BASE_DIR}"
-    python analyze_fid.py --fid_dir "${BASE_DIR}"
+    python analysis/summarize_fid.py --fid_dir "${BASE_DIR}"
+    python analysis/analyze_fid.py --fid_dir "${BASE_DIR}"
 fi
