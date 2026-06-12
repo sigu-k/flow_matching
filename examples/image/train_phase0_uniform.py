@@ -37,13 +37,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants – match Phase 0 spec exactly
 # ---------------------------------------------------------------------------
-CKPT_DIR = Path(os.path.expanduser("~/work/srv11/checkpoints/phase0_v2"))
+CKPT_DIR = Path(os.path.expanduser("~/work/srv11/checkpoints/phase0"))
 DATA_PATH = "./data/image_generation"
-WANDB_PROJECT = "phase0_v2"
+WANDB_PROJECT = "phase0-uniform-saturation"
 
 LR = 1e-4
 WARMUP_STEPS = 10_000
-BATCH_SIZE = 128
+BATCH_SIZE = 64
 EPOCHS = 300
 EMA_DECAY = 0.99995
 
@@ -488,7 +488,7 @@ def main():
     logger.info(f"UNet trainable params: {n_params/1e6:.1f}M")
 
     # ── Optimizer ───────────────────────────────────────────────────────────
-    optimizer = torch.optim.Adam(unet.parameters(), lr=LR, betas=(0.9, 0.999), weight_decay=0)
+    optimizer = torch.optim.AdamW(unet.parameters(), lr=LR, betas=(0.9, 0.95))
 
     # ── LR schedule: linear warmup over WARMUP_STEPS, then constant ─────────
     def lr_lambda(step):
@@ -541,9 +541,7 @@ def main():
                 "fid_samples": FID_SAMPLES,
                 "fid_batch": FID_BATCH,
                 "precision": "fp32",
-                "optimizer": "Adam",
-                "optimizer_betas": [0.9, 0.999],
-                "weight_decay": 0,
+                "optimizer_betas": [0.9, 0.95],
                 "unet_model_channels": 128,
                 "unet_channel_mult": [2, 2, 2],
                 "unet_num_res_blocks": 4,
