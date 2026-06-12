@@ -1,0 +1,6 @@
+sampler_id: mode_s+1.0
+sampler:
+  type: mode
+  mu: null
+  sigma: null
+  s: 1.0
