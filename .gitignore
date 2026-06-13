@@ -71,3 +71,17 @@ output_dir/
 *mixture_uniform_step=320001/
 *.out
 *.err
+
+# Research experiment artifacts
+*.log
+*.pth
+*.pt
+*.ckpt
+output*/
+results/
+fid_results/
+wandb/
+snapshots/
+memo*.txt
+.claude/
+examples/image/training/timestep_density_comparison.png
