@@ -85,3 +85,4 @@ snapshots/
 memo*.txt
 .claude/
 examples/image/training/timestep_density_comparison.png
+*memo*.txt
