@@ -85,6 +85,9 @@ def get_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--eval-only", action="store_true",
                    help="Run FID eval for the epoch stored in latest.pt, then exit")
+    p.add_argument("--alpha", type=float, default=0.3,
+                   help="Uniform mixture weight α ∈ [0, 1]. "
+                        "p_new(t) = α·1 + (1-α)·p_orig(t). 0 = no mixing.")
     return p.parse_args()
 
 
@@ -105,6 +108,21 @@ def build_sampler(cfg: dict):
         return lambda bs, dev: sample_mode(bs, s=s, device=dev)
     else:
         raise ValueError(f"Unknown sampler type: {stype!r}")
+
+
+# ---------------------------------------------------------------------------
+# Uniform mixture wrapper
+# ---------------------------------------------------------------------------
+def wrap_with_uniform_mix(sampler_fn, alpha: float):
+    """p_new(t) = α · Uniform(0,1) + (1-α) · p_orig(t)"""
+    if alpha == 0.0:
+        return sampler_fn
+
+    def _mixed(bs, dev):
+        mask = torch.bernoulli(torch.full((bs,), alpha, device=dev)).bool()
+        return torch.where(mask, torch.rand(bs, device=dev), sampler_fn(bs, dev))
+
+    return _mixed
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +193,11 @@ def main():
     sampler_id = cfg.get("sampler_id") or Path(args.config).stem
     sampler_cfg = cfg["sampler"]
     sample_t = build_sampler(sampler_cfg)
+    sample_t = wrap_with_uniform_mix(sample_t, args.alpha)
 
     ckpt_dir = CKPT_BASE / sampler_id
 
-    logger.info(f"Phase 1 Static  sampler={sampler_id}  ckpt_dir={ckpt_dir}")
+    logger.info(f"Phase 1 Static  sampler={sampler_id}  alpha={args.alpha}  ckpt_dir={ckpt_dir}")
 
     # Apply --dry-run defaults
     if args.dry_run:
@@ -255,6 +274,7 @@ def main():
             config={
                 "sampler_id": sampler_id,
                 "sampler": wandb_sampler_cfg,
+                "uniform_mix_alpha": args.alpha,
                 "max_epochs": args.max_epochs,
                 "batch_size": BATCH_SIZE,
                 "lr": LR,
