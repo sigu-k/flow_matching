@@ -180,7 +180,7 @@ def compute_per_timestep_loss(raw_unet, dataloader, device, n_batches=100):
 
     raw_unet.train()
     return {
-        f"bin_{i:02d}": float(np.mean(v)) if v else float("nan")
+        f"t_{i}_{i+1}": float(np.mean(v)) if v else float("nan")
         for i, v in enumerate(bin_losses)
     }
 
@@ -245,10 +245,10 @@ def _compute_fid(images_uint8, data_path, device):
 
 def evaluate_fid(ema_model, device, data_path, epoch_1indexed, global_step,
                  fid_history, n_samples, fid_batch, fid_nfe, fid_seed):
-    """Evaluate FID with EMA and raw weights. Skips if epoch already in history."""
+    """Evaluate FID with EMA and raw weights. Skips if fid_ema already recorded for this epoch."""
     for entry in fid_history:
-        if entry["epoch"] == epoch_1indexed:
-            logger.info(f"Epoch {epoch_1indexed} already in FID history – skipping")
+        if entry["epoch"] == epoch_1indexed and "fid_ema" in entry:
+            logger.info(f"Epoch {epoch_1indexed} already has FID in history – skipping")
             return None
 
     logger.info(f"=== FID evaluation at epoch {epoch_1indexed} ===")

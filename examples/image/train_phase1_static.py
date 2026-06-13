@@ -52,7 +52,7 @@ CKPT_BASE = Path(os.path.expanduser("~/work/srv11/checkpoints/phase1_static"))
 LR = 1e-4
 WARMUP_STEPS = 10_000
 BATCH_SIZE = 64
-EPOCHS = 150
+EPOCHS = 180
 EMA_DECAY = 0.99995
 
 EVAL_EVERY = 20
@@ -61,7 +61,7 @@ FID_NFE = 50
 FID_BATCH = 250
 FID_SEED = 0
 
-KEEP_EPOCHS = {50, 100, 150}
+KEEP_EPOCHS = {60, 120, 180}
 KEEP_RECENT_N = 3
 
 
@@ -83,6 +83,8 @@ def get_args():
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--eval-only", action="store_true",
+                   help="Run FID eval for the epoch stored in latest.pt, then exit")
     return p.parse_args()
 
 
@@ -274,6 +276,60 @@ def main():
 
     fid_history = load_fid_history(ckpt_dir)
 
+    # --eval-only: run FID for the checkpoint epoch and exit
+    if args.eval_only:
+        epoch_1indexed = start_epoch  # start_epoch = last completed epoch
+        logger.info(f"--eval-only: evaluating epoch {epoch_1indexed} …")
+        per_ts = compute_per_timestep_loss(unet, dataloader, device)
+        logger.info(f"Per-timestep loss: {per_ts}")
+
+        # Persist per_t_loss immediately (upsert) so it survives even if FID fails
+        existing = next((e for e in fid_history if e["epoch"] == epoch_1indexed), None)
+        if existing is None:
+            existing = {"epoch": epoch_1indexed, "global_step": global_step}
+            fid_history.append(existing)
+        existing["per_timestep_loss"] = per_ts
+        save_fid_history(ckpt_dir, fid_history)
+
+        if run is not None:
+            run.log(
+                {f"per_t_loss/{k}": v for k, v in per_ts.items()}
+                | {"epoch": epoch_1indexed, "global_step": global_step}
+            )
+
+        try:
+            fid_result = evaluate_fid(
+                ema_model, device, args.data_path,
+                epoch_1indexed, global_step, fid_history,
+                n_samples=args.fid_samples or FID_SAMPLES,
+                fid_batch=FID_BATCH,
+                fid_nfe=FID_NFE,
+                fid_seed=FID_SEED,
+            )
+        except Exception:
+            logger.exception(f"FID evaluation failed at epoch {epoch_1indexed} – per_t_loss already saved")
+            fid_result = None
+
+        if fid_result is not None:
+            existing["fid_ema"] = fid_result["fid_ema"]
+            existing["fid_raw"] = fid_result["fid_raw"]
+            save_fid_history(ckpt_dir, fid_history)
+            logger.info(
+                f"FID@epoch{epoch_1indexed}: EMA={fid_result['fid_ema']:.3f}"
+                f"  raw={fid_result['fid_raw']:.3f}"
+            )
+            if run is not None:
+                run.log({
+                    "eval/fid_ema": fid_result["fid_ema"],
+                    "eval/fid_raw": fid_result["fid_raw"],
+                    "epoch": epoch_1indexed,
+                    "global_step": global_step,
+                })
+
+        if run is not None:
+            run.finish()
+        return
+
     # Training loop
     logger.info(f"Training epochs {start_epoch+1} → {args.max_epochs} …")
     total_start = time.time()
@@ -309,31 +365,38 @@ def main():
         if is_eval_epoch:
             logger.info(f"Computing per-timestep loss at epoch {epoch_1indexed} …")
             per_ts = compute_per_timestep_loss(unet, dataloader, device)
+            logger.info(f"Per-timestep loss: {per_ts}")
+
+            # Persist per_t_loss immediately (upsert) so it survives even if FID fails
+            existing = next((e for e in fid_history if e["epoch"] == epoch_1indexed), None)
+            if existing is None:
+                existing = {"epoch": epoch_1indexed, "global_step": global_step}
+                fid_history.append(existing)
+            existing["per_timestep_loss"] = per_ts
+            save_fid_history(ckpt_dir, fid_history)
+
             if run is not None:
                 run.log(
                     {f"per_t_loss/{k}": v for k, v in per_ts.items()}
                     | {"epoch": epoch_1indexed, "global_step": global_step}
                 )
-            logger.info(f"Per-timestep loss: {per_ts}")
 
-            fid_result = evaluate_fid(
-                ema_model, device, args.data_path,
-                epoch_1indexed, global_step, fid_history,
-                n_samples=args.fid_samples,
-                fid_batch=FID_BATCH,
-                fid_nfe=FID_NFE,
-                fid_seed=FID_SEED,
-            )
+            try:
+                fid_result = evaluate_fid(
+                    ema_model, device, args.data_path,
+                    epoch_1indexed, global_step, fid_history,
+                    n_samples=args.fid_samples,
+                    fid_batch=FID_BATCH,
+                    fid_nfe=FID_NFE,
+                    fid_seed=FID_SEED,
+                )
+            except Exception:
+                logger.exception(f"FID evaluation failed at epoch {epoch_1indexed} – per_t_loss already saved")
+                fid_result = None
 
             if fid_result is not None:
-                entry = {
-                    "epoch": epoch_1indexed,
-                    "global_step": global_step,
-                    "fid_ema": fid_result["fid_ema"],
-                    "fid_raw": fid_result["fid_raw"],
-                    "per_timestep_loss": per_ts,
-                }
-                fid_history.append(entry)
+                existing["fid_ema"] = fid_result["fid_ema"]
+                existing["fid_raw"] = fid_result["fid_raw"]
                 save_fid_history(ckpt_dir, fid_history)
                 logger.info(
                     f"FID@epoch{epoch_1indexed}: EMA={fid_result['fid_ema']:.3f}"
