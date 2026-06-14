@@ -294,7 +294,7 @@ def main():
         wandb_run_id = run.id
         logger.info(f"New wandb run: {wandb_run_id}")
 
-    fid_history = load_fid_history(ckpt_dir)
+    fid_history = [] if args.no_resume else load_fid_history(ckpt_dir)
 
     # --eval-only: run FID for the checkpoint epoch and exit
     if args.eval_only:
