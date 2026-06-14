@@ -47,7 +47,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DATA_PATH = "./data/image_generation"
 WANDB_PROJECT = "phase1-static-baselines"
-CKPT_BASE = Path(os.path.expanduser("~/work/srv11/checkpoints/phase1_static"))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+CKPT_BASE = _REPO_ROOT / "checkpoints" / "phase1_static"
 
 LR = 1e-4
 WARMUP_STEPS = 10_000

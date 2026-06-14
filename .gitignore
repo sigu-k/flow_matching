@@ -38,7 +38,6 @@ MANIFEST
 # Others
 examples/image_generation/data
 examples/*/output_dir*
-examples/image/scripts
 examples/image/outputs
 examples/image/data
 examples/image/output_dir
@@ -80,6 +79,7 @@ output_dir/
 output*/
 results/
 fid_results/
+checkpoints/
 wandb/
 snapshots/
 memo*.txt
