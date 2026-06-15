@@ -1,0 +1,6 @@
+sampler_id: uniform
+sampler:
+  type: uniform
+  mu: null
+  sigma: null
+  s: null
