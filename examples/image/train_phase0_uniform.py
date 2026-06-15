@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants – match Phase 0 spec exactly
 # ---------------------------------------------------------------------------
-CKPT_DIR = Path(os.path.expanduser("~/work/srv11/checkpoints/phase0"))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+CKPT_DIR = _REPO_ROOT / "checkpoints" / "phase0"
 DATA_PATH = "./data/image_generation"
 WANDB_PROJECT = "phase0-uniform-saturation"
 

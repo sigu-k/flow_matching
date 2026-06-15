@@ -43,3 +43,19 @@ timestep 分布(学習時 ρ(t) と推論時ステップ配置)を独立に振�
 - output_<dist>/checkpoint.pth を触らない
 - git push を確認なしにしない
 - training/ の既存コードを大幅にリファクタしない
+
+## パスのポータビリティルール
+
+コード中の絶対パスに `srv11` や `srv21` などのサーバ名を含めない。
+他サーバで `git pull` して使えるよう、リポジトリ内の絶対パスはすべてリポジトリルートからの相対で導出すること。
+
+```python
+# 良い例
+_REPO_ROOT = Path(__file__).resolve().parents[N]
+CKPT_DIR = _REPO_ROOT / "checkpoints" / "phase0"
+
+# 悪い例
+CKPT_DIR = Path(os.path.expanduser("~/work/srv11/checkpoints/phase0"))
+```
+
+バックグラウンド実行コマンドのログ出力先なども同様に、サーバ固有パスを避けること。
