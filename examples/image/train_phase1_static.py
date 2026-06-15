@@ -37,7 +37,13 @@ from phase1_utils import (
     save_checkpoint,
     save_fid_history,
 )
-from timestep_sampler import sample_logit_normal, sample_mode, sample_uniform
+from timestep_sampler import (
+    sample_linear_decreasing,
+    sample_linear_increasing,
+    sample_logit_normal,
+    sample_mode,
+    sample_uniform,
+)
 from training.data_transform import get_train_transform
 
 logger = logging.getLogger(__name__)
@@ -107,6 +113,12 @@ def build_sampler(cfg: dict):
     elif stype == "mode":
         s = float(cfg["s"])
         return lambda bs, dev: sample_mode(bs, s=s, device=dev)
+    elif stype == "linear_decreasing":
+        floor = float(cfg["floor"])
+        return lambda bs, dev: sample_linear_decreasing(bs, floor=floor, device=dev)
+    elif stype == "linear_increasing":
+        floor = float(cfg["floor"])
+        return lambda bs, dev: sample_linear_increasing(bs, floor=floor, device=dev)
     else:
         raise ValueError(f"Unknown sampler type: {stype!r}")
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Visualise the 4 timestep samplers used in Phase 0 / Phase 1:
-  Uniform, LN(μ, σ), Mode(s1), Mode(s2)
+Visualise the 5 timestep samplers used in Phase 0 / Phase 1:
+  Uniform, LN(μ, σ), Mode(s1), Mode(s2), LinearDecreasing(floor)
 
 Uniform-mixture mode (--alpha):
   p_new(t) = α · 1 + (1-α) · p_original(t)
@@ -13,6 +13,8 @@ Usage examples:
   python visualize_samplers.py --mode_s1 -1.0 --mode_s2 2.0 --dpi 200
   python visualize_samplers.py --alpha 0.3
   python visualize_samplers.py --alpha 0.2 --ln_mu -1.2
+  python visualize_samplers.py --linear-floor 0.0   # 三角形
+  python visualize_samplers.py --linear-floor 0.5   # 緩やか
   python visualize_samplers.py --out_path outputs/custom_name.png  # exact path (no timestamp added)
 """
 
@@ -28,7 +30,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from timestep_sampler import sample_logit_normal, sample_mode, sample_uniform
+from timestep_sampler import (
+    sample_linear_decreasing,
+    sample_linear_increasing,
+    sample_logit_normal,
+    sample_mode,
+    sample_uniform,
+)
 
 
 def parse_args():
@@ -56,11 +64,21 @@ def parse_args():
                         help="Uniform mixture weight α ∈ [0, 1]. "
                              "p_new(t) = α·1 + (1-α)·p_orig(t). "
                              "0 = no mixing, 1 = pure Uniform.")
+    parser.add_argument("--linear-floor", type=float, default=0.3,
+                        help="LinearDecreasing floor parameter ∈ [0, 1). "
+                             "Density at t=1. 0 → pure triangular, larger → flatter.")
+    parser.add_argument("--linear-inc-floor", type=float, default=0.3,
+                        help="LinearIncreasing floor parameter ∈ [0, 1). "
+                             "Density at t=0 (data-side). 0 → pure triangular, larger → flatter.")
     parser.add_argument("--out_path", type=str, default=None,
                         help="Output PNG path. If omitted, a timestamped name is used under outputs/")
     args = parser.parse_args()
     if not (0.0 <= args.alpha <= 1.0):
         parser.error(f"--alpha must be in [0, 1], got {args.alpha}")
+    if not (0.0 <= args.linear_floor < 1.0):
+        parser.error(f"--linear-floor must be in [0, 1), got {args.linear_floor}")
+    if not (0.0 <= args.linear_inc_floor < 1.0):
+        parser.error(f"--linear-inc-floor must be in [0, 1), got {args.linear_inc_floor}")
     return args
 
 
@@ -68,6 +86,8 @@ def build_samplers(args):
     n, dev = args.n_samples, args.device
     mu, sigma = args.ln_mu, args.ln_sigma
     s1, s2 = args.mode_s1, args.mode_s2
+    lf = args.linear_floor
+    lif = args.linear_inc_floor
 
     # alpha/beta for Beta distribution: alpha = beta = 1 / (1 + |s|) when s != 0
     def _beta_ab(s):
@@ -117,6 +137,18 @@ def build_samplers(args):
             "pdf": lambda t, _a=a2, _b=b2: _beta_pdf(t, _a, _b),
             "color": "#B47CC7",
         },
+        {
+            "label": f"LinearDecreasing (floor={lf:.2f})  [noise-side]",
+            "fn": lambda: sample_linear_decreasing(n, floor=lf, device=dev),
+            "pdf": lambda t, _lf=lf: (2.0 - _lf) - 2.0 * (1.0 - _lf) * t,
+            "color": "#E87D37",
+        },
+        {
+            "label": f"LinearIncreasing (floor={lif:.2f})  [data-side]",
+            "fn": lambda: sample_linear_increasing(n, floor=lif, device=dev),
+            "pdf": lambda t, _lf=lif: _lf + 2.0 * (1.0 - _lf) * t,
+            "color": "#8C613C",
+        },
     ]
 
 
@@ -152,7 +184,8 @@ def resolve_out_path(args):
         return Path(args.out_path)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     alpha_tag = f"_a{args.alpha:.2f}" if args.alpha > 0.0 else ""
-    return Path(f"outputs/sampler_distributions_{ts}{alpha_tag}.png")
+    lf_tag = f"_lf{args.linear_floor:.2f}"
+    return Path(f"outputs/sampler_distributions_{ts}{alpha_tag}{lf_tag}.png")
 
 
 def main():
@@ -163,7 +196,7 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     alpha_note = f"  ·  Uniform mix α={args.alpha:.2f}  (floor={args.alpha:.2f})" if args.alpha > 0.0 else ""
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 8))
     fig.suptitle(
         f"Timestep distributions  ·  t=0 (noise) ← ——— → t=1 (data){alpha_note}",
         fontsize=12, y=1.01,
