@@ -19,6 +19,9 @@ import matplotlib.colors as mcolors
 import numpy as np
 
 DISTS = ["uniform", "center", "both", "data", "noise"]
+# Display labels swap "data"/"noise" because the training script had them reversed.
+# Directories named data__* actually used the noise-side-biased distribution, and vice versa.
+DISPLAY_DISTS = ["uniform", "center", "both", "noise", "data"]
 
 
 def load_grid(fid_dir: Path) -> tuple[np.ndarray, int | None]:
@@ -96,8 +99,8 @@ def write_heatmap(grid: np.ndarray, path: Path, nfe: int | None = None) -> None:
 
     ax.set_xticks(range(5))
     ax.set_yticks(range(5))
-    ax.set_xticklabels(DISTS, fontsize=10)
-    ax.set_yticklabels(DISTS, fontsize=10)
+    ax.set_xticklabels(DISPLAY_DISTS, fontsize=10)
+    ax.set_yticklabels(DISPLAY_DISTS, fontsize=10)
     ax.set_xlabel("Inference step placement (sampling_dist)", fontsize=11)
     ax.set_ylabel("Training timestep dist (train_dist)", fontsize=11)
     nfe_str = str(nfe) if nfe is not None else "?"
