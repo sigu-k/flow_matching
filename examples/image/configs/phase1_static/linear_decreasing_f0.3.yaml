@@ -1,0 +1,4 @@
+sampler_id: linear_decreasing_f0.3
+sampler:
+  type: linear_decreasing
+  floor: 0.3

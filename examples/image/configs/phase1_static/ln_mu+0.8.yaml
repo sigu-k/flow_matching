@@ -1,0 +1,5 @@
+sampler_id: ln_mu+0.8
+sampler:
+  type: logit_normal
+  mu: 0.8
+  sigma: 1.0
