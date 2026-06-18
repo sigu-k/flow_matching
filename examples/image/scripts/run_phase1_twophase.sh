@@ -31,6 +31,12 @@ CKPT_EPOCHS=20,40,60
 #   INIT_FROM=../../checkpoints/phase1_twophase/<source_id>/ckpt_epoch040.pt
 # Leave INIT_FROM empty to train from scratch.
 INIT_FROM=
+
+# Log file label. Re-runs with the SAME label APPEND to logs/run_<LABEL>.log,
+# so one run stays in one file. Leave empty to auto-derive from the configs +
+# change_epoch (matches the checkpoint dir id). Set a short name if you prefer,
+# e.g. LABEL=lnp08_uniform_e60 -> logs/run_lnp08_uniform_e60.log
+LABEL=
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -41,7 +47,13 @@ cd "$REPO_ROOT/examples/image"
 
 LOGDIR=./logs
 mkdir -p "$LOGDIR"
-LOGFILE="$LOGDIR/train_phase1_twophase_$(date +%Y%m%d_%H%M%S).log"
+# Deterministic, human-readable log name -> re-runs append to the same file.
+if [ -z "$LABEL" ]; then
+    P1=$(basename "$PHASE1_CONFIG" .yaml)
+    P2=$(basename "$PHASE2_CONFIG" .yaml)
+    LABEL="${P1}__${P2}__e${CHANGE_EPOCH}"
+fi
+LOGFILE="$LOGDIR/run_${LABEL}.log"
 
 EXTRA_ARGS=""
 [ -n "$CKPT_EPOCHS" ] && EXTRA_ARGS="$EXTRA_ARGS --ckpt-epochs $CKPT_EPOCHS"
