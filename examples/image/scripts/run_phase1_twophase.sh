@@ -18,6 +18,19 @@ PHASE2_CONFIG=configs/phase1_static/uniform.yaml
 PHASE2_ALPHA=0
 # Epoch (inclusive, 1-indexed) at which phase 1 ends; phase 2 starts at +1.
 CHANGE_EPOCH=60
+
+# --- fork points: which epochs to keep as full resume checkpoints -----------
+# Epochs 1..F of any run with the SAME phase-1 dist are identical, so a later run
+# can reuse the source's epoch-F state (INIT_FROM) and only recompute F+1.. .
+# CKPT_EPOCHS lists the EXACT epochs to keep (kept forever, nothing else saved;
+# ~1.8GB each). Planned forks at 30,40,50,60,70 only need {20,40,60} retained —
+# 30/50/70 are reached by forking from 20/40/60 and recomputing a few epochs.
+CKPT_EPOCHS=20,40,60
+
+# Then, to launch a fork, point INIT_FROM at a kept checkpoint (epoch <= CHANGE_EPOCH), e.g.
+#   INIT_FROM=../../checkpoints/phase1_twophase/<source_id>/ckpt_epoch040.pt
+# Leave INIT_FROM empty to train from scratch.
+INIT_FROM=
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -30,10 +43,15 @@ LOGDIR=./logs
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/train_phase1_twophase_$(date +%Y%m%d_%H%M%S).log"
 
+EXTRA_ARGS=""
+[ -n "$CKPT_EPOCHS" ] && EXTRA_ARGS="$EXTRA_ARGS --ckpt-epochs $CKPT_EPOCHS"
+[ -n "$INIT_FROM" ]   && EXTRA_ARGS="$EXTRA_ARGS --init-from $INIT_FROM"
+
 nohup python train_phase1_twophase.py \
     --phase1-config "$PHASE1_CONFIG" --phase1-alpha "$PHASE1_ALPHA" \
     --phase2-config "$PHASE2_CONFIG" --phase2-alpha "$PHASE2_ALPHA" \
     --change-epoch "$CHANGE_EPOCH" \
+    $EXTRA_ARGS \
     >> "$LOGFILE" 2>&1 &
 
 echo "PID=$!  Log: $LOGFILE"

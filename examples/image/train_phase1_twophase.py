@@ -22,6 +22,78 @@ Run from: flow_matching/examples/image/
       --phase2-config configs/phase1_static/uniform.yaml   --phase2-alpha 0 \
       --change-epoch 60
 """
+"""
+① 新規実行(source = e60)
+
+  PHASE1_CONFIG=configs/phase1_static/ln_mu+0.8.yaml ; PHASE1_ALPHA=0
+  PHASE2_CONFIG=configs/phase1_static/uniform.yaml   ; PHASE2_ALPHA=0
+  CHANGE_EPOCH=60
+  CKPT_EPOCHS=20,40,60     # fork 元として残す(40→e40/e50, 60→e70, 20→e30)
+  INIT_FROM=               # 空 = 新規
+  bash scripts/run_phase1_twophase.sh
+  → 出力 checkpoints/phase1_twophase/ln_mu+0.8__uniform__e60/、ログ logs/...
+
+  ---
+  ② 再実行 / 再開(中断・クラッシュ後)
+
+  ①と全く同じ設定のまま、もう一度実行するだけ。
+
+  bash scripts/run_phase1_twophase.sh
+  - 自分の dir の latest.pt(毎 epoch 保存)から自動再開。wandb も同じ run を継続。
+  - INIT_FROM が入っていても、自分の latest.pt があればそちらを優先(fork 元に巻き戻らない)。
+  - 最初からやり直すときだけ --no-resume を足す(※同じ dir を上書きするので注意)。
+
+  ---
+  ③ fork(source の checkpoint から派生)
+
+  CHANGE_EPOCH と INIT_FROM を変えるだけ。INIT_FROM は source の epoch ≤ 新 CHANGE_EPOCH。
+
+  # 例: e50 を作る(epoch40 から → 41〜50 を phase1 再計算 → 51〜 phase2)
+  PHASE1_CONFIG=configs/phase1_static/ln_mu+0.8.yaml ; PHASE1_ALPHA=0
+  PHASE2_CONFIG=configs/phase1_static/uniform.yaml   ; PHASE2_ALPHA=0
+  CHANGE_EPOCH=50
+  CKPT_EPOCHS=                # fork 先では基本不要(空)
+  INIT_FROM=../../checkpoints/phase1_twophase/ln_mu+0.8__uniform__e60/ckpt_epoch040.pt
+  bash scripts/run_phase1_twophase.sh
+
+  各 run の設定値:
+
+  ┌──────────┬──────────────┬──────────────────────────────────────┐
+  │ 作る run │ CHANGE_EPOCH │ INIT_FROM(末尾 .../ckpt_epochNNN.pt) │
+  ├──────────┼──────────────┼──────────────────────────────────────┤
+  │ e30      │ 30           │ ..._e60/ckpt_epoch020.pt             │
+  ├──────────┼──────────────┼──────────────────────────────────────┤
+  │ e40      │ 40           │ ..._e60/ckpt_epoch040.pt             │
+  ├──────────┼──────────────┼──────────────────────────────────────┤
+  │ e50      │ 50           │ ..._e60/ckpt_epoch040.pt             │
+  ├──────────┼──────────────┼──────────────────────────────────────┤
+  │ e70      │ 70           │ ..._e60/ckpt_epoch060.pt             │
+  └──────────┴──────────────┴──────────────────────────────────────┘
+
+  (共通 prefix: ../../checkpoints/phase1_twophase/ln_mu+0.8__uniform)
+
+  fork 後の挙動:
+  - 新規 dir ..._e30/, ..._e40/ … に出力(source には触れない)
+  - wandb は新規 run
+  - fork 後の再実行は②と同じ(自分の latest.pt から再開)
+
+  ---
+  直接実行版(sh を使わない場合の雛形)
+
+  cd <repo>/examples/image
+  export PYTHONPATH="<repo>:$PYTHONPATH" ; mkdir -p logs
+  nohup python train_phase1_twophase.py \
+      --phase1-config configs/phase1_static/ln_mu+0.8.yaml --phase1-alpha 0 \
+      --phase2-config configs/phase1_static/uniform.yaml   --phase2-alpha 0 \
+      --change-epoch 60 \
+      --ckpt-epochs 20,40,60 \           # ①新規のとき
+      >> logs/run_lnp08_uniform_e60.log 2>&1 &
+  echo "PID=$!"
+  - ②再開:上の --ckpt-epochs ... 込みの同じコマンドを再実行。
+  - ③fork:--ckpt-epochs を外し --change-epoch <N> と --init-from <...ckpt_epochNNN.pt> を指定。
+
+  要点:① と ② はコマンドが同一(再開は自動)、③ は CHANGE_EPOCH + INIT_FROM を変えるだけです。
+  """
 
 import argparse
 import logging
@@ -116,6 +188,31 @@ def get_args():
     p.add_argument("--max-epochs", type=int, default=None)
     p.add_argument("--no-resume", action="store_true")
     p.add_argument("--resume-from", type=str, default=None)
+    p.add_argument("--init-from", type=str, default=None,
+                   help="Fork: initialise weights+optimizer+scheduler+RNG from this "
+                        "external checkpoint (e.g. another run's ckpt_epoch040.pt), "
+                        "continuing the epoch count from it but starting a FRESH wandb "
+                        "run and writing to THIS run's own dir. Ignored once this run "
+                        "has its own latest.pt (so restarts resume normally).")
+    p.add_argument("--keep-epochs", type=str, default="60,120,180",
+                   help="Comma-separated epochs whose periodic checkpoints are never "
+                        "pruned. Set this on the SOURCE run so a fork point survives, "
+                        "e.g. --keep-epochs 40,60,120,180.")
+    p.add_argument("--ckpt-epochs", type=str, default=None,
+                   help="Comma-separated EXACT epochs to save a full resume checkpoint at, "
+                        "kept forever and nothing else (e.g. 30,40,50,60,70 for planned "
+                        "fork points). Overrides the --ckpt-every / --keep-* cadence. "
+                        "latest.pt is still written every epoch for crash-resume.")
+    p.add_argument("--ckpt-every", type=int, default=None,
+                   help="Cadence (epochs) for full resume checkpoints, INDEPENDENT of "
+                        "FID --eval-every. Default = --eval-every. Use a small value "
+                        "(e.g. 10) to leave fork points at fine granularity. "
+                        "Ignored if --ckpt-epochs is set.")
+    p.add_argument("--keep-recent-n", type=int, default=KEEP_RECENT_N,
+                   help=f"Keep the most recent N periodic checkpoints (default {KEEP_RECENT_N}).")
+    p.add_argument("--keep-all", action="store_true",
+                   help="Never prune periodic checkpoints, so EVERY --ckpt-every epoch "
+                        "stays forkable later. Costs ~1.8GB per checkpoint.")
     p.add_argument("--eval-every", type=int, default=None)
     p.add_argument("--snapshot-every", type=int, default=None,
                    help="Save a weights-only snapshot every N epochs "
@@ -278,6 +375,15 @@ def main():
         args.fid_samples = args.fid_samples or FID_SAMPLES
         args.snapshot_every = args.snapshot_every or SNAPSHOT_EVERY
 
+    keep_epochs = {int(x) for x in args.keep_epochs.split(",") if x.strip()}
+    ckpt_every = args.ckpt_every or args.eval_every
+    keep_recent_n = 10**9 if args.keep_all else args.keep_recent_n
+    ckpt_epochs = ({int(x) for x in args.ckpt_epochs.split(",") if x.strip()}
+                   if args.ckpt_epochs else None)
+    if ckpt_epochs is not None:
+        logger.info(f"Full resume checkpoints saved ONLY at epochs {sorted(ckpt_epochs)} "
+                    "(kept forever); latest.pt still written every epoch.")
+
     if not (1 <= change_epoch < args.max_epochs):
         logger.warning(
             f"change_epoch={change_epoch} outside [1, max_epochs-1]={args.max_epochs-1}: "
@@ -335,10 +441,35 @@ def main():
     )
     logger.info(f"Dataset: {len(dataset)} samples  {len(dataloader)} batches/epoch")
 
-    # Resume
-    start_epoch, global_step, wandb_run_id = load_checkpoint(
-        ckpt_dir, args, ema_model, optimizer, scheduler
-    )
+    # Resume / fork.
+    # --init-from forks from an external checkpoint (full state, but a FRESH wandb
+    # run) and is honoured only on first launch: once this run has its own
+    # latest.pt, restarts resume from it normally.
+    own_latest = (ckpt_dir / "latest.pt").exists()
+    do_fork = (args.init_from and not args.no_resume
+               and not args.resume_from and not own_latest)
+    if do_fork:
+        if not Path(args.init_from).exists():
+            raise FileNotFoundError(f"--init-from not found: {args.init_from}")
+        args.resume_from = args.init_from          # reuse the loader for full state
+        start_epoch, global_step, _ = load_checkpoint(
+            ckpt_dir, args, ema_model, optimizer, scheduler
+        )
+        args.resume_from = None
+        wandb_run_id = None                        # fresh wandb run; don't inherit source
+        logger.info(
+            f"Forked from {args.init_from}: continuing at epoch {start_epoch} "
+            f"(phase selected by this run's change_epoch={change_epoch})"
+        )
+        if start_epoch > change_epoch:
+            logger.warning(
+                f"fork point (epoch {start_epoch-1}) is past change_epoch={change_epoch}: "
+                "phase 1 never runs in this fork — check you forked at epoch <= change_epoch."
+            )
+    else:
+        start_epoch, global_step, wandb_run_id = load_checkpoint(
+            ckpt_dir, args, ema_model, optimizer, scheduler
+        )
 
     # wandb
     wandb_cfg_p1 = {k: v for k, v in sampler_cfg_p1.items() if v is not None}
@@ -464,11 +595,23 @@ def main():
                 "epoch_time_sec": epoch_sec,
             })
 
-        save_checkpoint(
-            ckpt_dir, ema_model, optimizer, scheduler,
-            epoch, global_step, wandb_run_id,
-            args.eval_every, KEEP_EPOCHS, KEEP_RECENT_N,
-        )
+        if ckpt_epochs is not None:
+            # Explicit mode: write latest.pt every epoch, but a kept-forever named
+            # checkpoint ONLY at the requested epochs. eval_every=1 forces the named
+            # save at those epochs; the huge keep_recent_n + keep set means nothing
+            # else is ever written, so exactly {ckpt_epochs} survive.
+            save_checkpoint(
+                ckpt_dir, ema_model, optimizer, scheduler,
+                epoch, global_step, wandb_run_id,
+                1 if epoch_1indexed in ckpt_epochs else 10**9,
+                ckpt_epochs, 10**9,
+            )
+        else:
+            save_checkpoint(
+                ckpt_dir, ema_model, optimizer, scheduler,
+                epoch, global_step, wandb_run_id,
+                ckpt_every, keep_epochs, keep_recent_n,
+            )
 
         # Post-hoc EMA snapshot: raw weights only, fp16, never pruned.
         if (epoch_1indexed % args.snapshot_every == 0
