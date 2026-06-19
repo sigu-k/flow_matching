@@ -22,16 +22,28 @@ Run from: flow_matching/examples/image/
       --phase2-config configs/phase1_static/uniform.yaml   --phase2-alpha 0 \
       --change-epoch 60
 """
-"""
+r"""
+ラッパー scripts/run_phase1_twophase.sh の使い方(推奨)
+======================================================
+このスクリプトは内部で nohup ... & によりバックグラウンド起動する。設定値は
+すべて ${VAR:-default} 形式なので、同名の環境変数を前置きすれば上書きでき、
+何も渡さなければスクリプト内のデフォルトが使われる(ファイル編集は不要)。
+起動直後に "Resolved settings:" として解決済みの設定が echo されるので、
+意図した config / change_epoch で回っているかをその場で確認できる。
+扱える変数:PHASE1_CONFIG / PHASE1_ALPHA / PHASE2_CONFIG / PHASE2_ALPHA /
+            CHANGE_EPOCH / CKPT_EPOCHS / INIT_FROM / LABEL
+
 ① 新規実行(source = e60)
 
-  PHASE1_CONFIG=configs/phase1_static/ln_mu+0.8.yaml ; PHASE1_ALPHA=0
-  PHASE2_CONFIG=configs/phase1_static/uniform.yaml   ; PHASE2_ALPHA=0
-  CHANGE_EPOCH=60
-  CKPT_EPOCHS=20,40,60     # fork 元として残す(40→e40/e50, 60→e70, 20→e30)
-  INIT_FROM=               # 空 = 新規
+  cd <repo>/examples/image
+  PHASE1_CONFIG=configs/phase1_static/ln_mu+0.8.yaml \
+  PHASE2_CONFIG=configs/phase1_static/uniform.yaml \
+  PHASE1_ALPHA=0 PHASE2_ALPHA=0 \
+  CHANGE_EPOCH=60 \
+  CKPT_EPOCHS=20,40,60 \      # fork 元として残す(40→e40/e50, 60→e70, 20→e30)
+  INIT_FROM= \                # 空 = 新規
   bash scripts/run_phase1_twophase.sh
-  → 出力 checkpoints/phase1_twophase/ln_mu+0.8__uniform__e60/、ログ logs/...
+  → 出力 checkpoints/phase1_twophase/ln_mu+0.8__uniform__e60/、ログ logs/run_<id>.log
 
   ---
   ② 再実行 / 再開(中断・クラッシュ後)
@@ -42,6 +54,8 @@ Run from: flow_matching/examples/image/
   - 自分の dir の latest.pt(毎 epoch 保存)から自動再開。wandb も同じ run を継続。
   - INIT_FROM が入っていても、自分の latest.pt があればそちらを優先(fork 元に巻き戻らない)。
   - 最初からやり直すときだけ --no-resume を足す(※同じ dir を上書きするので注意)。
+  注意:②は「次の epoch から」再開するため、クラッシュした eval epoch の FID は
+        飛ばされる。その epoch の FID だけ後から埋めたいときは下記④ --eval-only を使う。
 
   ---
   ③ fork(source の checkpoint から派生)
@@ -49,11 +63,12 @@ Run from: flow_matching/examples/image/
   CHANGE_EPOCH と INIT_FROM を変えるだけ。INIT_FROM は source の epoch ≤ 新 CHANGE_EPOCH。
 
   # 例: e50 を作る(epoch40 から → 41〜50 を phase1 再計算 → 51〜 phase2)
-  PHASE1_CONFIG=configs/phase1_static/ln_mu+0.8.yaml ; PHASE1_ALPHA=0
-  PHASE2_CONFIG=configs/phase1_static/uniform.yaml   ; PHASE2_ALPHA=0
-  CHANGE_EPOCH=50
-  CKPT_EPOCHS=                # fork 先では基本不要(空)
-  INIT_FROM=../../checkpoints/phase1_twophase/ln_mu+0.8__uniform__e60/ckpt_epoch040.pt
+  PHASE1_CONFIG=configs/phase1_static/ln_mu+0.8.yaml \
+  PHASE2_CONFIG=configs/phase1_static/uniform.yaml \
+  PHASE1_ALPHA=0 PHASE2_ALPHA=0 \
+  CHANGE_EPOCH=50 \
+  CKPT_EPOCHS= \              # fork 先では基本不要(空)
+  INIT_FROM=../../checkpoints/phase1_twophase/ln_mu+0.8__uniform__e60/ckpt_epoch040.pt \
   bash scripts/run_phase1_twophase.sh
 
   各 run の設定値:
@@ -78,6 +93,27 @@ Run from: flow_matching/examples/image/
   - fork 後の再実行は②と同じ(自分の latest.pt から再開)
 
   ---
+  ④ 推論のみ再実行(FID 補完 / --eval-only)
+
+  latest.pt(または --resume-from で指定した checkpoint)の epoch に対して FID
+  評価だけを実行して終了する(学習は進めない)。クラッシュで欠けた epoch の
+  fid_history を埋めたいときに使う。fid_history にその epoch の fid_ema が既に
+  あればスキップ、無ければ生成して追記する。
+
+  cd <repo>/examples/image
+  export PYTHONPATH="<repo>:$PYTHONPATH" ; mkdir -p logs
+  nohup python train_phase1_twophase.py \
+      --phase1-config configs/phase1_static/ln_mu+0.8.yaml --phase1-alpha 0 \
+      --phase2-config configs/phase1_static/uniform.yaml   --phase2-alpha 0 \
+      --change-epoch 60 \
+      --eval-only \
+      --resume-from ../../checkpoints/phase1_twophase/ln_mu+0.8__uniform__e60/ckpt_epoch040.pt \
+      >> logs/eval_e40.log 2>&1 &
+  echo "PID=$!"
+  - --resume-from を省くと latest.pt の epoch を評価する(=その時点の最終 epoch)。
+  - 特定 epoch を確実に狙うなら恒久保存した ckpt_epochNNN.pt を --resume-from で指定。
+
+  ---
   直接実行版(sh を使わない場合の雛形)
 
   cd <repo>/examples/image
@@ -92,7 +128,8 @@ Run from: flow_matching/examples/image/
   - ②再開:上の --ckpt-epochs ... 込みの同じコマンドを再実行。
   - ③fork:--ckpt-epochs を外し --change-epoch <N> と --init-from <...ckpt_epochNNN.pt> を指定。
 
-  要点:① と ② はコマンドが同一(再開は自動)、③ は CHANGE_EPOCH + INIT_FROM を変えるだけです。
+  要点:① と ② はコマンドが同一(再開は自動)、③ は CHANGE_EPOCH + INIT_FROM を変えるだけ。
+        欠けた epoch の FID だけ埋めたいときは④ --eval-only。
   """
 
 import argparse

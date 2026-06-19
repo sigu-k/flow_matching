@@ -4,20 +4,26 @@
 #   epoch 1 .. CHANGE_EPOCH      -> phase 1
 #   epoch CHANGE_EPOCH+1 .. end  -> phase 2
 #
-# Edit the three settings below, then: bash scripts/run_phase1_twophase.sh
-# Run from anywhere inside the repo — paths are resolved automatically.
+# Two ways to set the run, both work:
+#   (1) Edit the defaults below, then:  bash scripts/run_phase1_twophase.sh
+#   (2) Override per-run via env vars (no file edit), e.g.:
+#         PHASE1_CONFIG=configs/phase1_static/ln_mu+0.8.yaml \
+#         CHANGE_EPOCH=60 INIT_FROM= \
+#         bash scripts/run_phase1_twophase.sh
+# Every setting below uses ${VAR:-default}, so an env var of the same name wins;
+# unset vars fall back to the default. Run from anywhere inside the repo.
 
 # ---------------------------------------------------------------------------
-# 3 settings to specify
+# Settings (override any of these via an env var of the same name)
 # ---------------------------------------------------------------------------
 # Phase 1 timestep distribution (epochs 1..CHANGE_EPOCH)
-PHASE1_CONFIG=configs/phase1_static/ln_mu-0.8.yaml
-PHASE1_ALPHA=0
+PHASE1_CONFIG=${PHASE1_CONFIG:-configs/phase1_static/ln_mu-0.8.yaml}
+PHASE1_ALPHA=${PHASE1_ALPHA:-0}
 # Phase 2 timestep distribution (epochs CHANGE_EPOCH+1..end)
-PHASE2_CONFIG=configs/phase1_static/uniform.yaml
-PHASE2_ALPHA=0
+PHASE2_CONFIG=${PHASE2_CONFIG:-configs/phase1_static/uniform.yaml}
+PHASE2_ALPHA=${PHASE2_ALPHA:-0}
 # Epoch (inclusive, 1-indexed) at which phase 1 ends; phase 2 starts at +1.
-CHANGE_EPOCH=60
+CHANGE_EPOCH=${CHANGE_EPOCH:-60}
 
 # --- fork points: which epochs to keep as full resume checkpoints -----------
 # Epochs 1..F of any run with the SAME phase-1 dist are identical, so a later run
@@ -25,18 +31,18 @@ CHANGE_EPOCH=60
 # CKPT_EPOCHS lists the EXACT epochs to keep (kept forever, nothing else saved;
 # ~1.8GB each). Planned forks at 30,40,50,60,70 only need {20,40,60} retained —
 # 30/50/70 are reached by forking from 20/40/60 and recomputing a few epochs.
-CKPT_EPOCHS=20,40,60
+CKPT_EPOCHS=${CKPT_EPOCHS:-20,40,60}
 
 # Then, to launch a fork, point INIT_FROM at a kept checkpoint (epoch <= CHANGE_EPOCH), e.g.
 #   INIT_FROM=../../checkpoints/phase1_twophase/<source_id>/ckpt_epoch040.pt
 # Leave INIT_FROM empty to train from scratch.
-INIT_FROM=
+INIT_FROM=${INIT_FROM:-}
 
 # Log file label. Re-runs with the SAME label APPEND to logs/run_<LABEL>.log,
 # so one run stays in one file. Leave empty to auto-derive from the configs +
 # change_epoch (matches the checkpoint dir id). Set a short name if you prefer,
 # e.g. LABEL=lnp08_uniform_e60 -> logs/run_lnp08_uniform_e60.log
-LABEL=
+LABEL=${LABEL:-}
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -58,6 +64,13 @@ LOGFILE="$LOGDIR/run_${LABEL}.log"
 EXTRA_ARGS=""
 [ -n "$CKPT_EPOCHS" ] && EXTRA_ARGS="$EXTRA_ARGS --ckpt-epochs $CKPT_EPOCHS"
 [ -n "$INIT_FROM" ]   && EXTRA_ARGS="$EXTRA_ARGS --init-from $INIT_FROM"
+
+# Echo the resolved settings so a wrong override is obvious before the job starts.
+echo "Resolved settings:"
+echo "  PHASE1_CONFIG=$PHASE1_CONFIG  PHASE1_ALPHA=$PHASE1_ALPHA"
+echo "  PHASE2_CONFIG=$PHASE2_CONFIG  PHASE2_ALPHA=$PHASE2_ALPHA"
+echo "  CHANGE_EPOCH=$CHANGE_EPOCH  CKPT_EPOCHS=${CKPT_EPOCHS:-<none>}  INIT_FROM=${INIT_FROM:-<none, fresh>}"
+echo "  LOGFILE=$LOGFILE"
 
 nohup python train_phase1_twophase.py \
     --phase1-config "$PHASE1_CONFIG" --phase1-alpha "$PHASE1_ALPHA" \
