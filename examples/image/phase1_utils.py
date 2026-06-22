@@ -47,9 +47,10 @@ def atomic_save(obj, path: Path):
     tmp.rename(path)
 
 
-def _make_state(model, optimizer, scheduler, epoch, global_step, wandb_run_id):
+def _make_state(model, optimizer, scheduler, epoch, global_step, wandb_run_id,
+                sampler_state=None):
     assert model.training
-    return {
+    state = {
         "ema_state": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
@@ -62,6 +63,9 @@ def _make_state(model, optimizer, scheduler, epoch, global_step, wandb_run_id):
         "rng_torch_cuda": (torch.cuda.get_rng_state()
                            if torch.cuda.is_available() else None),
     }
+    if sampler_state is not None:
+        state["sampler_state"] = sampler_state
+    return state
 
 
 def _epoch_from_name(p: Path) -> int:
@@ -81,10 +85,12 @@ def _prune_checkpoints(ckpt_dir: Path, current_epoch_1indexed: int,
 
 def save_checkpoint(ckpt_dir: Path, model, optimizer, scheduler,
                     epoch, global_step, wandb_run_id, eval_every,
-                    keep_epochs: set, keep_recent_n: int = 3):
+                    keep_epochs: set, keep_recent_n: int = 3,
+                    sampler_state=None):
     """Save latest.pt every epoch; save + prune periodic checkpoints every eval_every."""
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    state = _make_state(model, optimizer, scheduler, epoch, global_step, wandb_run_id)
+    state = _make_state(model, optimizer, scheduler, epoch, global_step,
+                        wandb_run_id, sampler_state=sampler_state)
     atomic_save(state, ckpt_dir / "latest.pt")
 
     epoch_1indexed = epoch + 1
@@ -95,8 +101,14 @@ def save_checkpoint(ckpt_dir: Path, model, optimizer, scheduler,
         _prune_checkpoints(ckpt_dir, epoch_1indexed, keep_epochs, keep_recent_n)
 
 
-def load_checkpoint(ckpt_dir: Path, args, model, optimizer, scheduler):
-    """Returns (start_epoch, global_step, wandb_run_id)."""
+def load_checkpoint(ckpt_dir: Path, args, model, optimizer, scheduler,
+                    bin_sampler=None):
+    """Returns (start_epoch, global_step, wandb_run_id).
+
+    If `bin_sampler` is given and the checkpoint carries a "sampler_state"
+    (adaptive_bin runs), the bin distribution / optimizer / baseline are
+    restored too. Old checkpoints without it are silently ignored.
+    """
     if args.no_resume:
         logger.info("--no-resume: starting from scratch")
         return 0, 0, None
@@ -119,6 +131,10 @@ def load_checkpoint(ckpt_dir: Path, args, model, optimizer, scheduler):
     model.load_state_dict(ckpt["ema_state"])
     optimizer.load_state_dict(ckpt["optimizer"])
     scheduler.load_state_dict(ckpt["scheduler"])
+
+    if bin_sampler is not None and "sampler_state" in ckpt:
+        bin_sampler.load_state_dict(ckpt["sampler_state"])
+        logger.info("Restored adaptive bin sampler state from checkpoint")
 
     random.setstate(ckpt["rng_python"])
     np.random.set_state(ckpt["rng_numpy"])
