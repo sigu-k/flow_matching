@@ -6,6 +6,11 @@ Reconstructs an exponential-EMA model with ANY decay from the fp16 weight
 snapshots dumped by train_phase1_posthoc.py, then (optionally) evaluates FID.
 Training is never re-run; reconstruction is a weighted sum of stored weights.
 
+Snapshots are read from checkpoints/<ckpt-base>/<sampler>/snapshots/. --ckpt-base
+defaults to phase1_posthoc but can point at any tree that dumped snapshots via
+posthoc_snapshot.save_snapshot (e.g. phase1_twophase, phase1_bin_adaptive), since
+the snapshot/manifest format is shared.
+
 Run from: flow_matching/examples/image/
   # list available snapshots for a sampler
   python reconstruct_ema.py --sampler ln_mu-0.8 --list
@@ -15,6 +20,10 @@ Run from: flow_matching/examples/image/
 
   # reconstruct and compute FID (writes posthoc_results/<sampler>.json)
   python reconstruct_ema.py --sampler ln_mu-0.8 --decay 0.9999 --fid
+
+  # reconstruct from an existing two-phase run (no posthoc run needed)
+  python reconstruct_ema.py --ckpt-base phase1_twophase \
+      --sampler ln_mu-0.8__uniform__e60 --decay 0.9999 --fid
 
 All paths are repo-relative (derived from __file__), so no server-specific
 absolute path appears and the tool runs unchanged on any checkout.
@@ -37,7 +46,8 @@ from posthoc_snapshot import load_manifest, snapshot_dir
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-CKPT_BASE = _REPO_ROOT / "checkpoints" / "phase1_posthoc"
+CKPT_ROOT = _REPO_ROOT / "checkpoints"
+DEFAULT_CKPT_BASE = "phase1_posthoc"
 RESULTS_DIR = Path(__file__).resolve().parent / "posthoc_results"
 
 # FID defaults mirror train_phase1_posthoc.py for comparability.
@@ -50,7 +60,12 @@ FID_SEED = 0
 def get_args():
     p = argparse.ArgumentParser("Post-hoc EMA reconstruction")
     p.add_argument("--sampler", required=True,
-                   help="sampler_id, i.e. the dir under checkpoints/phase1_posthoc/")
+                   help="sampler_id, i.e. the dir under checkpoints/<ckpt-base>/")
+    p.add_argument("--ckpt-base", type=str, default=DEFAULT_CKPT_BASE,
+                   help="checkpoints/ subtree that holds the run (default "
+                        f"{DEFAULT_CKPT_BASE!r}). Snapshots are read from "
+                        "checkpoints/<ckpt-base>/<sampler>/snapshots/. Use e.g. "
+                        "phase1_twophase or phase1_bin_adaptive to reconstruct those.")
     p.add_argument("--decay", type=float, default=0.9999,
                    help="Exponential EMA decay to reconstruct (per optimizer step).")
     p.add_argument("--until-step", type=int, default=None,
@@ -126,7 +141,7 @@ def main():
     )
     args = get_args()
 
-    snap_dir = snapshot_dir(CKPT_BASE / args.sampler)
+    snap_dir = snapshot_dir(CKPT_ROOT / args.ckpt_base / args.sampler)
     manifest = load_manifest(snap_dir)
     snaps = manifest["snapshots"]
     if not snaps:
@@ -173,10 +188,15 @@ def main():
     logger.info(f"Reconstructed-EMA FID: {fid:.3f}  ({elapsed:.0f}s)")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    res_path = RESULTS_DIR / f"{args.sampler}.json"
+    # Keep the original filename for the default tree; namespace others so runs
+    # that share a sampler_id across trees don't clobber each other.
+    res_name = (f"{args.sampler}.json" if args.ckpt_base == DEFAULT_CKPT_BASE
+                else f"{args.ckpt_base}__{args.sampler}.json")
+    res_path = RESULTS_DIR / res_name
     history = json.loads(res_path.read_text()) if res_path.exists() else []
     history.append({
         "sampler_id": args.sampler,
+        "ckpt_base": args.ckpt_base,
         "decay": args.decay,
         "until_step": until_step,
         "n_snapshots_used": len(used),
