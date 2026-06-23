@@ -40,7 +40,7 @@ class AdaptiveBinSampler:
 
     def __init__(self, k=10, sampler_lr=1e-3, baseline_beta=0.9,
                  entropy_coef=0.01, update_sampler_every=40,
-                 eval_times=(0.1, 0.5, 0.9), device="cuda"):
+                 eval_times=(0.1, 0.5, 0.9), reward_scale=100.0, device="cuda"):
         self.k = k
         self.bin_logits = torch.nn.Parameter(torch.zeros(k, device=device))
         self.optimizer = torch.optim.Adam([self.bin_logits], lr=sampler_lr)
@@ -49,6 +49,7 @@ class AdaptiveBinSampler:
         self.entropy_coef = entropy_coef
         self.update_sampler_every = update_sampler_every
         self.eval_times = list(eval_times)
+        self.reward_scale = reward_scale
         self.device = device
         self._last_bin = None  # bin chosen by the most recent sample_t()
 
@@ -87,8 +88,10 @@ class AdaptiveBinSampler:
         log_prob = torch.log(p[self._last_bin] + 1e-8)
         entropy = -(p * torch.log(p + 1e-8)).sum()
         # advantage is a python float (detached by construction); gradient flows
-        # only through log_prob and entropy (i.e. through bin_logits).
-        sampler_loss = -advantage * log_prob - self.entropy_coef * entropy
+        # only through log_prob and entropy (i.e. through bin_logits). reward_scale
+        # amplifies the (typically tiny) advantage so the bins actually move.
+        scaled_advantage = self.reward_scale * advantage
+        sampler_loss = -scaled_advantage * log_prob - self.entropy_coef * entropy
 
         self.optimizer.zero_grad()
         sampler_loss.backward()
@@ -97,6 +100,8 @@ class AdaptiveBinSampler:
         return {
             "reward": reward,
             "advantage": advantage,
+            "scaled_advantage": scaled_advantage,
+            "reward_scale": self.reward_scale,
             "entropy": float(entropy.item()),
             "selected_bin": self._last_bin,
             "eval_loss_before": float(eval_loss_before),

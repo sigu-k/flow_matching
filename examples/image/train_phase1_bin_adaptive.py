@@ -87,6 +87,7 @@ BASELINE_BETA = 0.9
 ENTROPY_COEF = 0.01
 UPDATE_SAMPLER_EVERY = 40
 EVAL_TIMES = "0.1,0.5,0.9"
+REWARD_SCALE = 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +108,9 @@ def get_args():
                    help=f"Update the bin distribution every N UNet steps (default {UPDATE_SAMPLER_EVERY}).")
     p.add_argument("--eval-times", type=str, default=EVAL_TIMES,
                    help=f"Comma-separated eval timesteps S for the reward (default '{EVAL_TIMES}').")
+    p.add_argument("--reward-scale", type=float, default=REWARD_SCALE,
+                   help="Scale factor applied to sampler advantage before REINFORCE update "
+                        f"(default {REWARD_SCALE}).")
     # run management (mirrors the phase1_* siblings)
     p.add_argument("--sampler-id", type=str, default=None,
                    help="Override the auto-generated run id / checkpoint dir name.")
@@ -299,6 +303,7 @@ def main():
         entropy_coef=args.entropy_coef,
         update_sampler_every=args.update_sampler_every,
         eval_times=eval_times,
+        reward_scale=args.reward_scale,
         device=device,
     )
 
@@ -340,6 +345,7 @@ def main():
                 "entropy_coef": args.entropy_coef,
                 "update_sampler_every": args.update_sampler_every,
                 "eval_times": eval_times,
+                "reward_scale": args.reward_scale,
                 "max_epochs": args.max_epochs,
                 "batch_size": BATCH_SIZE,
                 "lr": LR,
