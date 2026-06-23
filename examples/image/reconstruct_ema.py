@@ -50,6 +50,9 @@ CKPT_ROOT = _REPO_ROOT / "checkpoints"
 DEFAULT_CKPT_BASE = "phase1_posthoc"
 RESULTS_DIR = Path(__file__).resolve().parent / "posthoc_results"
 
+# New project for post-hoc EMA decay sweeps (separate from the training runs).
+WANDB_PROJECT = "phase1-posthoc-ema"
+
 # FID defaults mirror train_phase1_posthoc.py for comparability.
 FID_SAMPLES = 50_000
 FID_NFE = 50
@@ -75,13 +78,19 @@ def get_args():
                    help="Just list available snapshots and exit.")
     p.add_argument("--out", type=str, default=None,
                    help="Path to save the reconstructed weights (state_dict, fp32).")
-    p.add_argument("--fid", action="store_true",
-                   help="Generate samples and compute FID for the reconstructed model.")
+    p.add_argument("--fid", action=argparse.BooleanOptionalAction, default=True,
+                   help="Generate samples and compute FID (default: on; --no-fid to skip).")
     p.add_argument("--fid-samples", type=int, default=FID_SAMPLES)
     p.add_argument("--data-path", type=str, default="./data/image_generation")
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--model", type=str, default=None,
                    help="Model key for MODEL_CONFIGS (default: from manifest).")
+    p.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=True,
+                   help="Log the FID result to wandb (default: on; --no-wandb to skip).")
+    p.add_argument("--wandb-project", type=str, default=WANDB_PROJECT,
+                   help=f"wandb project to log into (default {WANDB_PROJECT!r}).")
+    p.add_argument("--wandb-name", type=str, default=None,
+                   help="wandb run name (default: <sampler>__d<decay>).")
     return p.parse_args()
 
 
@@ -169,10 +178,34 @@ def main():
         logger.info(f"Saved reconstructed weights: {out}")
 
     if not args.fid:
+        if args.wandb:
+            logger.warning("--wandb has no effect without --fid; skipping wandb.")
         return
 
     # FID — reuse the exact generation/eval path from training.
     from phase1_utils import _compute_fid, _generate_images
+
+    run = None
+    if args.wandb:
+        import wandb
+        run = wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_name or f"{args.sampler}__d{args.decay}",
+            config={
+                "sampler_id": args.sampler,
+                "ckpt_base": args.ckpt_base,
+                "decay": args.decay,
+                "until_step": until_step,
+                "n_snapshots_used": len(used),
+                "top_weight": float(weights.max()),
+                "ode_method": "euler",
+                "nfe": FID_NFE,
+                "fid_samples": args.fid_samples,
+                "fid_batch": FID_BATCH,
+                "seed": FID_SEED,
+            },
+        )
+        logger.info(f"wandb run: {run.project}/{run.id}")
 
     model_key = args.model or manifest.get("model", "cifar10")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -208,6 +241,13 @@ def main():
     })
     res_path.write_text(json.dumps(history, indent=2))
     logger.info(f"Appended result to {res_path}")
+
+    if run is not None:
+        # log() (not just summary) so a panel is created and the result is
+        # visible in the wandb workspace, plus x=decay makes a sweep plottable.
+        run.log({"fid": fid, "elapsed_sec": round(elapsed), "decay": args.decay})
+        run.summary["fid"] = fid
+        run.finish()
 
 
 if __name__ == "__main__":
