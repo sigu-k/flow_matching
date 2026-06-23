@@ -21,6 +21,7 @@ BASELINE_BETA=${BASELINE_BETA:-0.9}              # EMA factor for the reward bas
 ENTROPY_COEF=${ENTROPY_COEF:-0.01}               # entropy bonus weight
 UPDATE_SAMPLER_EVERY=${UPDATE_SAMPLER_EVERY:-40}  # update bins every N UNet steps
 EVAL_TIMES=${EVAL_TIMES:-0.1,0.5,0.9}            # eval timesteps S for the reward
+REWARD_SCALE=${REWARD_SCALE:-100.0}              # scale on advantage before REINFORCE
 
 # --- run management ---
 # Empty = full run (180 epochs). DRY_RUN=1 -> 2 epochs / FID 2000 (smoke-test).
@@ -64,6 +65,7 @@ EXTRA_ARGS=""
 echo "Resolved settings:"
 echo "  BIN_K=$BIN_K  SAMPLER_LR=$SAMPLER_LR  BASELINE_BETA=$BASELINE_BETA"
 echo "  ENTROPY_COEF=$ENTROPY_COEF  UPDATE_SAMPLER_EVERY=$UPDATE_SAMPLER_EVERY  EVAL_TIMES=$EVAL_TIMES"
+echo "  REWARD_SCALE=$REWARD_SCALE"
 echo "  DRY_RUN=${DRY_RUN:-<no>}  MAX_EPOCHS=${MAX_EPOCHS:-<default>}  EVAL_EVERY=${EVAL_EVERY:-<default>}"
 echo "  SAMPLER_ID=${SAMPLER_ID:-adaptive_bin_K${BIN_K}}  RESUME_FROM=${RESUME_FROM:-<own latest.pt>}"
 echo "  LOGFILE=$LOGFILE"
@@ -75,6 +77,7 @@ nohup python train_phase1_bin_adaptive.py \
     --entropy-coef "$ENTROPY_COEF" \
     --update-sampler-every "$UPDATE_SAMPLER_EVERY" \
     --eval-times "$EVAL_TIMES" \
+    --reward-scale "$REWARD_SCALE" \
     $EXTRA_ARGS \
     >> "$LOGFILE" 2>&1 &
 
