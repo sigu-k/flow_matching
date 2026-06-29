@@ -166,6 +166,42 @@ python train_phase0_uniform.py --no-resume
 
 ---
 
+## ディレクトリ規約(新規手法)
+
+今後新しく追加する手法は、`image/` 直下にファイルを散らさず、手法ごとに
+`methods/<method_name>/` ディレクトリへまとめる。
+
+```
+image/methods/<method_name>/
+├── train.py          # 学習エントリ
+├── run.sh            # 実行スクリプト(ログ先も固定)
+├── <method>_*.py     # その手法固有のモジュール(あれば)
+└── README.md         # 手法の概要・実行手順
+```
+
+- **雛形**: `methods/_template/` をコピーして始める(`cp -r methods/_template methods/<method_name>`)。
+- **ログ/出力**: `image/logs/<method_name>/` に固定。`run.sh` が自動で作成・追記する。
+- **チェックポイント**: `checkpoints/<method_name>/`(リポジトリルート直下)。
+- **共有資産**: `phase1_utils.py` / `train_arg_parser.py` / `models/` / `training/` は
+  `image/` 直下のまま据え置き。新規手法の `train.py` は import ヘッダで `image/` を
+  `sys.path` に通して参照する(サーバ名・cwd 非依存、`__file__` 基準で導出)。
+
+```python
+# methods/<method>/train.py の import ヘッダ
+import sys
+from pathlib import Path
+
+_IMAGE_DIR = Path(__file__).resolve().parents[2]   # examples/image
+_REPO_ROOT = Path(__file__).resolve().parents[4]   # flow_matching
+if str(_IMAGE_DIR) not in sys.path:
+    sys.path.insert(0, str(_IMAGE_DIR))            # phase1_utils, models, training を解決
+```
+
+**既存の `image/` 直下スクリプト(`train_phase1_*.py` など)はこの規約の対象外**で、
+当面そのまま据え置く(import 前提が変わるため一括移行はしない)。
+
+---
+
 ## Acknowledgements
 
 This example partially use code from:

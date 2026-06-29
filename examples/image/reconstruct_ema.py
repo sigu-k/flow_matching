@@ -6,6 +6,11 @@ Reconstructs an exponential-EMA model with ANY decay from the fp16 weight
 snapshots dumped by train_phase1_posthoc.py, then (optionally) evaluates FID.
 Training is never re-run; reconstruction is a weighted sum of stored weights.
 
+For a given decay, FID is traced across epochs (every --eval-every epochs, default
+20) so the FID-vs-epoch curve is observable, not just the final value. Generation
+noise is fixed (seed=0, identical x0 every call) and cuDNN is pinned deterministic,
+so FID differences reflect the weights only.
+
 Snapshots are read from checkpoints/<ckpt-base>/<sampler>/snapshots/. --ckpt-base
 defaults to phase1_posthoc but can point at any tree that dumped snapshots via
 posthoc_snapshot.save_snapshot (e.g. phase1_twophase, phase1_bin_adaptive), since
@@ -18,8 +23,11 @@ Run from: flow_matching/examples/image/
   # reconstruct decay=0.9999 at the final snapshot and save the model
   python reconstruct_ema.py --sampler ln_mu-0.8 --decay 0.9999 --out recon_d9999.pt
 
-  # reconstruct and compute FID (writes posthoc_results/<sampler>.json)
-  python reconstruct_ema.py --sampler ln_mu-0.8 --decay 0.9999 --fid
+  # trace FID vs epoch (every 20 epochs) for decay=0.999 -> posthoc_results/<sampler>.json
+  python reconstruct_ema.py --sampler uniform --decay 0.999 --fid
+
+  # only the final epoch's FID (no trajectory)
+  python reconstruct_ema.py --sampler uniform --decay 0.999 --fid --eval-every 0
 
   # reconstruct from an existing two-phase run (no posthoc run needed)
   python reconstruct_ema.py --ckpt-base phase1_twophase \
@@ -30,6 +38,7 @@ absolute path appears and the tool runs unchanged on any checkout.
 """
 
 import argparse
+import gc
 import json
 import logging
 import sys
@@ -58,6 +67,9 @@ FID_SAMPLES = 50_000
 FID_NFE = 50
 FID_BATCH = 250
 FID_SEED = 0
+# Trace FID every N epochs across the snapshots (mirrors train_phase1_static.py
+# EVAL_EVERY=20) so the FID-vs-epoch curve for a given decay can be observed.
+EVAL_EVERY_EPOCHS = 20
 
 
 def get_args():
@@ -72,8 +84,13 @@ def get_args():
     p.add_argument("--decay", type=float, default=0.9999,
                    help="Exponential EMA decay to reconstruct (per optimizer step).")
     p.add_argument("--until-step", type=int, default=None,
-                   help="Reconstruct the EMA as of this global_step "
+                   help="Cap the trajectory at this global_step "
                         "(default: the last available snapshot).")
+    p.add_argument("--eval-every", type=int, default=EVAL_EVERY_EPOCHS,
+                   help="Compute FID at every N-th epoch that has a snapshot, to "
+                        "trace the FID-vs-epoch curve for this decay (default "
+                        f"{EVAL_EVERY_EPOCHS}). Use 0 to evaluate only the final "
+                        "snapshot.")
     p.add_argument("--list", action="store_true",
                    help="Just list available snapshots and exit.")
     p.add_argument("--out", type=str, default=None,
@@ -163,19 +180,35 @@ def main():
                         f"num_updates={s['num_updates']:>8}  {s['file']}")
         return
 
-    until_step = args.until_step if args.until_step is not None else snaps[-1]["step"]
-    used, weights = compute_weights(snaps, args.decay, until_step)
-    logger.info(f"Reconstructing decay={args.decay} at step {until_step} "
-                f"from {len(used)} snapshots "
-                f"(top weight {weights.max():.4f} @ step {used[weights.argmax()]['step']}).")
+    final_step = snaps[-1]["step"]
+    until_step = args.until_step if args.until_step is not None else final_step
 
-    acc = reconstruct(snap_dir, used, weights)
+    # Choose the snapshots at which to evaluate FID, to trace the FID-vs-epoch
+    # curve for THIS decay. Mirrors train_phase1_static.py's EVAL_EVERY=20:
+    # evaluate every args.eval_every epochs, and always include the last
+    # snapshot at/below until_step. args.eval_every <= 0 -> only that last point.
+    candidates = [s for s in snaps if s["step"] <= until_step]
+    if not candidates:
+        raise SystemExit(f"No snapshots at or before step {until_step}.")
+    if args.eval_every and args.eval_every > 0:
+        eval_points = [s for s in candidates if s["epoch"] % args.eval_every == 0]
+        if candidates[-1] not in eval_points:
+            eval_points.append(candidates[-1])
+    else:
+        eval_points = [candidates[-1]]
+    logger.info(
+        f"decay={args.decay}: tracing FID at {len(eval_points)} epoch(s): "
+        f"{[s['epoch'] for s in eval_points]}"
+    )
 
     if args.out:
+        # Save the reconstruction at the final evaluated epoch.
+        s_last = eval_points[-1]
+        used, weights = compute_weights(snaps, args.decay, s_last["step"])
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(acc, out)
-        logger.info(f"Saved reconstructed weights: {out}")
+        torch.save(reconstruct(snap_dir, used, weights), out)
+        logger.info(f"Saved reconstructed weights (epoch {s_last['epoch']}): {out}")
 
     if not args.fid:
         if args.wandb:
@@ -184,6 +217,15 @@ def main():
 
     # FID — reuse the exact generation/eval path from training.
     from phase1_utils import _compute_fid, _generate_images
+
+    # Determinism: _generate_images reseeds the RNG to FID_SEED at the start of
+    # every call, so the initial ODE noise x0 is IDENTICAL across all decays and
+    # epochs — FID differences reflect the weights, not the sampling noise. We
+    # also pin cuDNN to deterministic conv algorithms (training uses
+    # benchmark=True, which can pick different kernels run-to-run) so a rerun of
+    # the same (decay, epoch) reproduces the same FID.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
     run = None
     if args.wandb:
@@ -196,13 +238,13 @@ def main():
                 "ckpt_base": args.ckpt_base,
                 "decay": args.decay,
                 "until_step": until_step,
-                "n_snapshots_used": len(used),
-                "top_weight": float(weights.max()),
+                "eval_every": args.eval_every,
                 "ode_method": "euler",
                 "nfe": FID_NFE,
                 "fid_samples": args.fid_samples,
                 "fid_batch": FID_BATCH,
                 "seed": FID_SEED,
+                "cudnn_deterministic": True,
             },
         )
         logger.info(f"wandb run: {run.project}/{run.id}")
@@ -210,15 +252,47 @@ def main():
     model_key = args.model or manifest.get("model", "cifar10")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     model = UNetModel(**MODEL_CONFIGS[model_key])
-    model.load_state_dict(acc)
     model.to(device).eval()
 
-    t0 = time.time()
-    logger.info(f"Generating {args.fid_samples} samples (nfe={FID_NFE}) ...")
-    imgs = _generate_images(model, device, args.fid_samples, FID_BATCH, FID_NFE, FID_SEED)
-    fid = _compute_fid(imgs, args.data_path, device)
-    elapsed = time.time() - t0
-    logger.info(f"Reconstructed-EMA FID: {fid:.3f}  ({elapsed:.0f}s)")
+    trajectory = []
+    for s in eval_points:
+        used, weights = compute_weights(snaps, args.decay, s["step"])
+        logger.info(
+            f"[epoch {s['epoch']}] reconstruct decay={args.decay} at step {s['step']} "
+            f"from {len(used)} snapshots "
+            f"(top weight {weights.max():.4f} @ step {used[weights.argmax()]['step']})"
+        )
+        model.load_state_dict(reconstruct(snap_dir, used, weights))
+        model.eval()
+
+        t0 = time.time()
+        logger.info(f"[epoch {s['epoch']}] generating {args.fid_samples} samples (nfe={FID_NFE}) ...")
+        imgs = _generate_images(model, device, args.fid_samples, FID_BATCH, FID_NFE, FID_SEED)
+        fid = _compute_fid(imgs, args.data_path, device)
+        del imgs
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elapsed = time.time() - t0
+        logger.info(f"[epoch {s['epoch']}] FID={fid:.3f}  ({elapsed:.0f}s)")
+
+        trajectory.append({
+            "epoch": s["epoch"],
+            "step": s["step"],
+            "fid": fid,
+            "n_snapshots_used": len(used),
+            "top_weight": float(weights.max()),
+            "elapsed_sec": round(elapsed),
+        })
+        if run is not None:
+            # x=epoch so the FID-vs-epoch curve is plottable in wandb.
+            run.log({"fid": fid, "epoch": s["epoch"], "step": s["step"]})
+
+    best = min(trajectory, key=lambda p: p["fid"])
+    logger.info(
+        f"decay={args.decay}: best FID={best['fid']:.3f} @ epoch {best['epoch']} "
+        f"(over {len(trajectory)} eval points)"
+    )
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     # Keep the original filename for the default tree; namespace others so runs
@@ -232,21 +306,20 @@ def main():
         "ckpt_base": args.ckpt_base,
         "decay": args.decay,
         "until_step": until_step,
-        "n_snapshots_used": len(used),
-        "fid": fid,
+        "eval_every": args.eval_every,
         "ode_method": "euler", "nfe": FID_NFE,
         "fid_samples": args.fid_samples, "batch_size": FID_BATCH, "seed": FID_SEED,
-        "elapsed_sec": round(elapsed),
+        "cudnn_deterministic": True,
+        "trajectory": trajectory,
+        "best_fid": best["fid"], "best_epoch": best["epoch"],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
     res_path.write_text(json.dumps(history, indent=2))
-    logger.info(f"Appended result to {res_path}")
+    logger.info(f"Appended {len(trajectory)}-point trajectory to {res_path}")
 
     if run is not None:
-        # log() (not just summary) so a panel is created and the result is
-        # visible in the wandb workspace, plus x=decay makes a sweep plottable.
-        run.log({"fid": fid, "elapsed_sec": round(elapsed), "decay": args.decay})
-        run.summary["fid"] = fid
+        run.summary["best_fid"] = best["fid"]
+        run.summary["best_epoch"] = best["epoch"]
         run.finish()
 
 

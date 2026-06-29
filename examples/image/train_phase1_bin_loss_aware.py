@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
 """
-Phase 1 Static: CIFAR-10 Flow Matching with configurable timestep sampler.
-150-epoch runs for LN(μ=-0.8), Mode(s=-0.5), Mode(s=+1.0).
+Phase 1 Loss-aware bin: CIFAR-10 Flow Matching with a loss-aware training-time
+timestep distribution.
+
+Sibling of train_phase1_bin_adaptive.py (same UNet, EMA, optimizer, FID/snapshot
+plumbing via phase1_utils). The conceptual change vs. the REINFORCE-based
+adaptive-bin run is the training-time timestep sampler ρ(t):
+
+  * t in [0,1] is split into K equal-width bins (default K=10).
+  * Every `update_sampler_every` UNet steps we MEASURE the current FM loss in
+    every bin (at the bin center) using the RAW UNet, keep an EMA of it, and
+    build a categorical distribution that puts more mass on high-loss bins:
+        p = (1 - uniform_mix) * softmax(zscore(loss_ema)/T) + uniform_mix/K
+  * Each batch samples ONE bin (1-batch-1-bin) and draws batch_size uniform t
+    inside it. During warmup (global_step < warmup_steps) sampling is uniform.
+
+Unlike the adaptive-bin sampler there is NO learnable parameter / optimizer and
+NO reward/advantage — only a per-bin loss EMA.
+
+All outputs go to a SEPARATE tree checkpoints/phase1_bin_loss_aware/ so the
+adaptive-bin / two-phase / static / posthoc runs are never touched. The wandb
+project is shared with the adaptive-bin runs (config "mode" disambiguates them).
 
 Run from: flow_matching/examples/image/
-  source ~/work/srv11/setup_env.sh
-  python train_phase1_static.py --config configs/phase1_static/ln_mu-0.8.yaml
-  python train_phase1_static.py --config configs/phase1_static/ln_mu-0.8.yaml --dry-run
-  python train_phase1_static.py --config configs/phase1_static/ln_mu-0.8.yaml --no-resume
+  python train_phase1_bin_loss_aware.py --bin-k 10
+  python train_phase1_bin_loss_aware.py --dry-run            # smoke-test
 """
 
 import argparse
 import logging
-import os
 import random
 import sys
 import time
@@ -23,8 +39,8 @@ import torch
 import torch.backends.cudnn as cudnn
 import torchvision.datasets as datasets
 import wandb
-import yaml
 
+from loss_aware_bin_sampler import LossAwareBinSampler, eval_fm_loss_per_bin
 from flow_matching.path import CondOTProbPath
 from models.ema import EMA
 from models.model_configs import MODEL_CONFIGS
@@ -37,27 +53,25 @@ from phase1_utils import (
     save_checkpoint,
     save_fid_history,
 )
-from timestep_sampler import (
-    sample_linear_decreasing,
-    sample_linear_increasing,
-    sample_logit_normal,
-    sample_mode,
-    sample_uniform,
-)
-from training.data_transform import get_train_transform
+from posthoc_snapshot import save_snapshot, snapshot_dir
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Hyperparameters (Phase 1 specific)
+# Hyperparameters (shared with the phase1_* siblings)
 # ---------------------------------------------------------------------------
 DATA_PATH = "./data/image_generation"
-WANDB_PROJECT = "phase1-static-baselines"
+# Shared wandb project with adaptive-bin runs; config "mode" disambiguates.
+WANDB_PROJECT = "phase1-bin-adaptive"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-CKPT_BASE = _REPO_ROOT / "checkpoints" / "phase1_static"
+# Separate tree from phase1_bin_adaptive / _static / _posthoc / _twophase.
+CKPT_BASE = _REPO_ROOT / "checkpoints" / "phase1_bin_loss_aware"
+MODEL_KEY = "cifar10"
+
+SNAPSHOT_EVERY = 2
 
 LR = 1e-4
-WARMUP_STEPS = 10_000
+WARMUP_STEPS = 10_000  # LR-scheduler warmup (UNet); distinct from sampler warmup
 BATCH_SIZE = 64
 EPOCHS = 180
 EMA_DECAY = 0.99995
@@ -71,80 +85,69 @@ FID_SEED = 0
 KEEP_EPOCHS = {60, 120, 180}
 KEEP_RECENT_N = 3
 
+# Loss-aware bin sampler defaults (spec)
+BIN_K = 10
+TEMPERATURE = 0.25
+UNIFORM_MIX = 0.05
+LOSS_EMA_BETA = 0.8
+UPDATE_SAMPLER_EVERY = 500
+SAMPLER_WARMUP_STEPS = 1000
+
 
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 def get_args():
-    p = argparse.ArgumentParser("Phase 1 Static: configurable timestep sampler")
-    p.add_argument("--config", required=True,
-                   help="Path to YAML config, e.g. configs/phase1_static/ln_mu-0.8.yaml")
+    p = argparse.ArgumentParser("Phase 1 Loss-aware bin: loss-aware timestep distribution")
+    # loss-aware bin sampler hyperparameters
+    p.add_argument("--bin-k", type=int, default=BIN_K,
+                   help=f"Number of equal-width timestep bins (default {BIN_K}).")
+    p.add_argument("--temperature", type=float, default=TEMPERATURE,
+                   help=f"Softmax temperature on the loss z-score (default {TEMPERATURE}).")
+    p.add_argument("--uniform-mix", type=float, default=UNIFORM_MIX,
+                   help=f"Uniform-mixing weight; sets the exploration floor (default {UNIFORM_MIX}).")
+    p.add_argument("--loss-ema-beta", type=float, default=LOSS_EMA_BETA,
+                   help=f"EMA factor for the per-bin loss (default {LOSS_EMA_BETA}).")
+    p.add_argument("--update-sampler-every", type=int, default=UPDATE_SAMPLER_EVERY,
+                   help=f"Remeasure bin losses / rebuild the distribution every N UNet steps "
+                        f"(default {UPDATE_SAMPLER_EVERY}).")
+    p.add_argument("--warmup-steps", type=int, default=SAMPLER_WARMUP_STEPS,
+                   help=f"Sampler warmup: uniform sampling while global_step < this "
+                        f"(default {SAMPLER_WARMUP_STEPS}).")
+    # run management (mirrors the phase1_* siblings)
+    p.add_argument("--sampler-id", type=str, default=None,
+                   help="Override the auto-generated run id / checkpoint dir name.")
     p.add_argument("--dry-run", action="store_true",
                    help="2 epochs, eval every 2, 2000 FID samples (smoke-test)")
     p.add_argument("--max-epochs", type=int, default=None)
     p.add_argument("--no-resume", action="store_true")
     p.add_argument("--resume-from", type=str, default=None)
+    p.add_argument("--keep-epochs", type=str, default="60,120,180",
+                   help="Comma-separated epochs whose periodic checkpoints are never pruned.")
+    p.add_argument("--ckpt-every", type=int, default=None,
+                   help="Cadence (epochs) for full resume checkpoints. Default = --eval-every.")
+    p.add_argument("--keep-recent-n", type=int, default=KEEP_RECENT_N,
+                   help=f"Keep the most recent N periodic checkpoints (default {KEEP_RECENT_N}).")
+    p.add_argument("--keep-all", action="store_true",
+                   help="Never prune periodic checkpoints.")
     p.add_argument("--eval-every", type=int, default=None)
+    p.add_argument("--snapshot-every", type=int, default=None,
+                   help=f"Save a weights-only snapshot every N epochs (default {SNAPSHOT_EVERY}).")
     p.add_argument("--fid-samples", type=int, default=None)
-    p.add_argument("--batch-size", type=int, default=BATCH_SIZE,
-                   help=f"Training batch size (default {BATCH_SIZE}). e.g. --batch-size 128")
     p.add_argument("--data-path", type=str, default=DATA_PATH)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--eval-only", action="store_true",
                    help="Run FID eval for the epoch stored in latest.pt, then exit")
-    p.add_argument("--alpha", type=float, default=0.3,
-                   help="Uniform mixture weight α ∈ [0, 1]. "
-                        "p_new(t) = α·1 + (1-α)·p_orig(t). 0 = no mixing.")
     return p.parse_args()
-
-
-# ---------------------------------------------------------------------------
-# Sampler factory
-# ---------------------------------------------------------------------------
-def build_sampler(cfg: dict):
-    """Return a callable (batch_size, device) -> Tensor from sampler config dict."""
-    stype = cfg["type"]
-    if stype == "uniform":
-        return lambda bs, dev: sample_uniform(bs, dev)
-    elif stype == "logit_normal":
-        mu = float(cfg["mu"])
-        sigma = float(cfg["sigma"])
-        return lambda bs, dev: sample_logit_normal(bs, mu=mu, sigma=sigma, device=dev)
-    elif stype == "mode":
-        s = float(cfg["s"])
-        return lambda bs, dev: sample_mode(bs, s=s, device=dev)
-    elif stype == "linear_decreasing":
-        floor = float(cfg["floor"])
-        return lambda bs, dev: sample_linear_decreasing(bs, floor=floor, device=dev)
-    elif stype == "linear_increasing":
-        floor = float(cfg["floor"])
-        return lambda bs, dev: sample_linear_increasing(bs, floor=floor, device=dev)
-    else:
-        raise ValueError(f"Unknown sampler type: {stype!r}")
-
-
-# ---------------------------------------------------------------------------
-# Uniform mixture wrapper
-# ---------------------------------------------------------------------------
-def wrap_with_uniform_mix(sampler_fn, alpha: float):
-    """p_new(t) = α · Uniform(0,1) + (1-α) · p_orig(t)"""
-    if alpha == 0.0:
-        return sampler_fn
-
-    def _mixed(bs, dev):
-        mask = torch.bernoulli(torch.full((bs,), alpha, device=dev)).bool()
-        return torch.where(mask, torch.rand(bs, device=dev), sampler_fn(bs, dev))
-
-    return _mixed
 
 
 # ---------------------------------------------------------------------------
 # Training loop (one epoch)
 # ---------------------------------------------------------------------------
-def train_one_epoch(ema_model, dataloader, optimizer, scheduler,
-                    device, epoch, global_step, run, sample_t):
+def train_one_epoch(ema_model, raw_model, dataloader, optimizer, scheduler,
+                    device, epoch, global_step, run, bin_sampler):
     ema_model.train(True)
     path = CondOTProbPath()
     total_loss = 0.0
@@ -154,7 +157,9 @@ def train_one_epoch(ema_model, dataloader, optimizer, scheduler,
         samples = samples.to(device) * 2.0 - 1.0
         noise = torch.randn_like(samples)
 
-        t = sample_t(samples.shape[0], device)
+        # 1-batch-1-bin: pick a bin, draw batch_size uniform t inside it. During
+        # warmup (global_step < warmup_steps) the bin is drawn uniformly.
+        t = bin_sampler.sample_t(samples.shape[0], device, global_step=global_step)
 
         ps = path.sample(t=t, x_0=noise, x_1=samples)
         pred = ema_model(ps.x_t, t, extra={})
@@ -170,12 +175,39 @@ def train_one_epoch(ema_model, dataloader, optimizer, scheduler,
         total_loss += loss.item()
         n_batches += 1
 
+        # Loss-aware sampler update: remeasure every bin's FM loss with the RAW
+        # UNet (no_grad), update the loss EMA and rebuild last_probs. Done every
+        # `update_sampler_every` steps (also during warmup, so the distribution
+        # is ready when warmup ends — sampling stays uniform meanwhile).
+        do_sampler_update = global_step % bin_sampler.update_sampler_every == 0
+        if do_sampler_update:
+            with torch.no_grad():
+                bin_losses = eval_fm_loss_per_bin(
+                    bin_sampler.k, samples, noise, path, raw_model
+                )
+            stats = bin_sampler.update(bin_losses)
+            if run is not None:
+                payload = bin_sampler.bin_prob_dict()
+                payload |= bin_sampler.bin_loss_dict()
+                payload |= {f"sampler/{k}": v for k, v in stats.items()}
+                payload["sampler/selected_bin"] = bin_sampler._last_bin
+                payload["sampler/update_flag"] = 1
+                payload["global_step"] = global_step
+                run.log(payload)
+
         if run is not None and global_step % 100 == 0:
-            run.log({
+            payload = {
                 "train/loss": loss.item(),
                 "train/lr": optimizer.param_groups[0]["lr"],
                 "global_step": global_step,
-            })
+            }
+            payload |= bin_sampler.bin_prob_dict()
+            payload["sampler/entropy"] = float(bin_sampler.entropy().item())
+            payload["sampler/max_prob"] = float(bin_sampler.last_probs.max().item())
+            payload["sampler/min_prob"] = float(bin_sampler.last_probs.min().item())
+            payload["sampler/selected_bin"] = bin_sampler._last_bin
+            payload["sampler/update_flag"] = 0
+            run.log(payload)
 
         if global_step % 1000 == 0:
             logger.info(
@@ -201,32 +233,44 @@ def main():
 
     args = get_args()
 
-    # Load YAML config
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
-
-    sampler_id = cfg.get("sampler_id") or Path(args.config).stem
-    sampler_cfg = cfg["sampler"]
-    sample_t = build_sampler(sampler_cfg)
-    sample_t = wrap_with_uniform_mix(sample_t, args.alpha)
-
+    sampler_id = args.sampler_id or (
+        f"lossaware_K{args.bin_k}_T{args.temperature}"
+        f"_mix{args.uniform_mix}_beta{args.loss_ema_beta}"
+    )
+    # Keep --dry-run smoke-test artifacts out of the production tree so a real
+    # run never resumes a 2-epoch dry-run checkpoint (only when the id is auto).
+    if args.dry_run and args.sampler_id is None:
+        sampler_id += "_dryrun"
     ckpt_dir = CKPT_BASE / sampler_id
 
-    logger.info(f"Phase 1 Static  sampler={sampler_id}  alpha={args.alpha}  ckpt_dir={ckpt_dir}")
+    logger.info(
+        f"Phase 1 Loss-aware bin  id={sampler_id}\n"
+        f"  K={args.bin_k}  temperature={args.temperature}  uniform_mix={args.uniform_mix}\n"
+        f"  loss_ema_beta={args.loss_ema_beta}  update_sampler_every={args.update_sampler_every}\n"
+        f"  warmup_steps={args.warmup_steps}\n"
+        f"  ckpt_dir={ckpt_dir}"
+    )
 
     # Apply --dry-run defaults
     if args.dry_run:
         args.max_epochs = args.max_epochs or 2
         args.eval_every = args.eval_every or 2
         args.fid_samples = args.fid_samples or 2_000
+        args.snapshot_every = args.snapshot_every or 1
     else:
         args.max_epochs = args.max_epochs or EPOCHS
         args.eval_every = args.eval_every or EVAL_EVERY
         args.fid_samples = args.fid_samples or FID_SAMPLES
+        args.snapshot_every = args.snapshot_every or SNAPSHOT_EVERY
+
+    keep_epochs = {int(x) for x in args.keep_epochs.split(",") if x.strip()}
+    ckpt_every = args.ckpt_every or args.eval_every
+    keep_recent_n = 10**9 if args.keep_all else args.keep_recent_n
+
+    snap_dir = snapshot_dir(ckpt_dir)
 
     logger.info(
-        f"max_epochs={args.max_epochs}  eval_every={args.eval_every}"
-        f"  dry_run={args.dry_run}"
+        f"max_epochs={args.max_epochs}  eval_every={args.eval_every}  dry_run={args.dry_run}"
     )
 
     # Reproducibility
@@ -247,7 +291,7 @@ def main():
     n_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
     logger.info(f"UNet trainable params: {n_params/1e6:.1f}M")
 
-    # Optimizer
+    # Optimizer (UNet)
     optimizer = torch.optim.AdamW(unet.parameters(), lr=LR, betas=(0.9, 0.95))
 
     def lr_lambda(step):
@@ -257,15 +301,28 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
+    # Loss-aware bin sampler (parameter-free; only a per-bin loss EMA, restored
+    # from checkpoint by load_checkpoint below when a sampler_state is present).
+    bin_sampler = LossAwareBinSampler(
+        k=args.bin_k,
+        temperature=args.temperature,
+        uniform_mix=args.uniform_mix,
+        loss_ema_beta=args.loss_ema_beta,
+        update_sampler_every=args.update_sampler_every,
+        warmup_steps=args.warmup_steps,
+        device=device,
+    )
+
     # Dataset
     logger.info(f"Loading CIFAR-10 from {args.data_path} …")
+    from training.data_transform import get_train_transform
     transform = get_train_transform()
     dataset = datasets.CIFAR10(
         root=args.data_path, train=True, download=True, transform=transform
     )
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
@@ -273,13 +330,12 @@ def main():
     )
     logger.info(f"Dataset: {len(dataset)} samples  {len(dataloader)} batches/epoch")
 
-    # Resume
+    # Resume (also restores the bin sampler if present in the checkpoint).
     start_epoch, global_step, wandb_run_id = load_checkpoint(
-        ckpt_dir, args, ema_model, optimizer, scheduler
+        ckpt_dir, args, ema_model, optimizer, scheduler, bin_sampler=bin_sampler
     )
 
     # wandb
-    wandb_sampler_cfg = {k: v for k, v in sampler_cfg.items() if v is not None}
     if wandb_run_id is not None:
         run = wandb.init(project=WANDB_PROJECT, id=wandb_run_id, resume="must")
         logger.info(f"Resumed wandb run: {wandb_run_id}")
@@ -288,12 +344,17 @@ def main():
             project=WANDB_PROJECT,
             config={
                 "sampler_id": sampler_id,
-                "sampler": wandb_sampler_cfg,
-                "uniform_mix_alpha": args.alpha,
+                "mode": "loss_aware_bin",
+                "bin_k": args.bin_k,
+                "temperature": args.temperature,
+                "uniform_mix": args.uniform_mix,
+                "loss_ema_beta": args.loss_ema_beta,
+                "update_sampler_every": args.update_sampler_every,
+                "warmup_steps": args.warmup_steps,
                 "max_epochs": args.max_epochs,
-                "batch_size": args.batch_size,
+                "batch_size": BATCH_SIZE,
                 "lr": LR,
-                "warmup_steps": WARMUP_STEPS,
+                "lr_warmup_steps": WARMUP_STEPS,
                 "ema_decay": EMA_DECAY,
                 "fid_nfe": FID_NFE,
                 "fid_samples": FID_SAMPLES,
@@ -318,7 +379,6 @@ def main():
         per_ts = compute_per_timestep_loss(unet, dataloader, device)
         logger.info(f"Per-timestep loss: {per_ts}")
 
-        # Persist per_t_loss immediately (upsert) so it survives even if FID fails
         existing = next((e for e in fid_history if e["epoch"] == epoch_1indexed), None)
         if existing is None:
             existing = {"epoch": epoch_1indexed, "global_step": global_step}
@@ -370,17 +430,19 @@ def main():
     total_start = time.time()
 
     for epoch in range(start_epoch, args.max_epochs):
+        epoch_1indexed = epoch + 1
+
         epoch_start = time.time()
         avg_loss, global_step = train_one_epoch(
-            ema_model, dataloader, optimizer, scheduler,
-            device, epoch, global_step, run, sample_t,
+            ema_model, unet, dataloader, optimizer, scheduler,
+            device, epoch, global_step, run, bin_sampler,
         )
         epoch_sec = time.time() - epoch_start
 
         if run is not None:
             run.log({
                 "train/epoch_loss": avg_loss,
-                "epoch": epoch + 1,
+                "epoch": epoch_1indexed,
                 "global_step": global_step,
                 "epoch_time_sec": epoch_sec,
             })
@@ -388,10 +450,21 @@ def main():
         save_checkpoint(
             ckpt_dir, ema_model, optimizer, scheduler,
             epoch, global_step, wandb_run_id,
-            args.eval_every, KEEP_EPOCHS, KEEP_RECENT_N,
+            ckpt_every, keep_epochs, keep_recent_n,
+            sampler_state=bin_sampler.state_dict(),
         )
 
-        epoch_1indexed = epoch + 1
+        # Post-hoc EMA snapshot: raw weights only, fp16, never pruned.
+        if (epoch_1indexed % args.snapshot_every == 0
+                or epoch_1indexed == args.max_epochs):
+            save_snapshot(
+                snap_dir, unet, global_step,
+                num_updates=ema_model.num_updates.item(),
+                epoch_1indexed=epoch_1indexed,
+                sampler_id=sampler_id,
+                model_key=MODEL_KEY,
+            )
+
         is_eval_epoch = (
             epoch_1indexed % args.eval_every == 0
             or epoch_1indexed == args.max_epochs
@@ -402,7 +475,6 @@ def main():
             per_ts = compute_per_timestep_loss(unet, dataloader, device)
             logger.info(f"Per-timestep loss: {per_ts}")
 
-            # Persist per_t_loss immediately (upsert) so it survives even if FID fails
             existing = next((e for e in fid_history if e["epoch"] == epoch_1indexed), None)
             if existing is None:
                 existing = {"epoch": epoch_1indexed, "global_step": global_step}

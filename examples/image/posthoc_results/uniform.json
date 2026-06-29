@@ -1,0 +1,92 @@
+[
+  {
+    "sampler_id": "uniform",
+    "ckpt_base": "phase1_posthoc",
+    "decay": 0.999,
+    "until_step": 140580,
+    "eval_every": 20,
+    "ode_method": "euler",
+    "nfe": 50,
+    "fid_samples": 50000,
+    "batch_size": 250,
+    "seed": 0,
+    "cudnn_deterministic": true,
+    "trajectory": [
+      {
+        "epoch": 20,
+        "step": 15620,
+        "fid": 38.726654213493646,
+        "n_snapshots_used": 2,
+        "top_weight": 0.9995960872221247,
+        "elapsed_sec": 3111
+      },
+      {
+        "epoch": 40,
+        "step": 31240,
+        "fid": 33.190153522660694,
+        "n_snapshots_used": 4,
+        "top_weight": 0.9991921741237448,
+        "elapsed_sec": 3103
+      },
+      {
+        "epoch": 60,
+        "step": 46860,
+        "fid": 25.311757556348653,
+        "n_snapshots_used": 6,
+        "top_weight": 0.9991921740578215,
+        "elapsed_sec": 3111
+      },
+      {
+        "epoch": 80,
+        "step": 62480,
+        "fid": 20.158197361996315,
+        "n_snapshots_used": 8,
+        "top_weight": 0.9991921740578217,
+        "elapsed_sec": 3111
+      },
+      {
+        "epoch": 100,
+        "step": 78100,
+        "fid": 17.52007056584563,
+        "n_snapshots_used": 10,
+        "top_weight": 0.9991921740578215,
+        "elapsed_sec": 3088
+      },
+      {
+        "epoch": 120,
+        "step": 93720,
+        "fid": 17.72800832862447,
+        "n_snapshots_used": 12,
+        "top_weight": 0.9991921740578217,
+        "elapsed_sec": 3112
+      },
+      {
+        "epoch": 140,
+        "step": 109340,
+        "fid": 17.015916765169493,
+        "n_snapshots_used": 14,
+        "top_weight": 0.9991921740578215,
+        "elapsed_sec": 3119
+      },
+      {
+        "epoch": 160,
+        "step": 124960,
+        "fid": 17.560679100974255,
+        "n_snapshots_used": 16,
+        "top_weight": 0.9991921740578217,
+        "elapsed_sec": 3121
+      },
+      {
+        "epoch": 180,
+        "step": 140580,
+        "fid": 15.466798701278265,
+        "n_snapshots_used": 18,
+        "top_weight": 0.9991921740578215,
+        "elapsed_sec": 3112
+      }
+    ],
+    "best_fid": 15.466798701278265,
+    "best_epoch": 180,
+    "timestamp": "2026-06-28T11:36:20.586408+00:00"
+  }
+]
